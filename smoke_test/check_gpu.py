@@ -73,7 +73,8 @@ def probe(module, options, inputs, labels, subject_ids, split, device, cuda_ids,
         raise FloatingPointError("预热检查出现无效损失或参数梯度")
 
     operators = sorted({event.key for event in trace.key_averages()
-                        if any(name in event.key.lower() for name in ("convolution", "cudnn", "aten::bmm", "aten::mm"))
+                        if any(name in event.key.lower() for name in
+                               ("convolution", "cudnn", "aten::bmm", "aten::mm", "scaled_dot_product"))
                         and event.key.startswith("aten::")})
     events = [event for event in trace.events() if event.device_type == torch.autograd.DeviceType.CUDA
               and not event.is_user_annotation]

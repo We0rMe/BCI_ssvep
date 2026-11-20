@@ -1,6 +1,6 @@
 # SSVEP 模型复现与比较
 
-本项目使用同一份 Benchmark 裁窗数据和同一套 LOSO 协议，比较 SSVEPformer、FB-SSVEPformer、SpikeTFNet、EEG-Deformer 和 MTSNet。 [SSVEPformer 与 FB-SSVEPformer](https://arxiv.org/abs/2210.04172) · [EEG-Deformer](https://github.com/yi-ding-cs/EEG-Deformer) · [MTSNet 作者实现](https://github.com/lanzhen19/MTSNet/blob/main/MTSNet.py)
+本项目使用同一份 Benchmark 裁窗数据和同一套 LOSO 协议，比较 SSVEPformer、SSVEPformer eKAN、FB-SSVEPformer、SpikeTFNet、EEG-Deformer、MTSNet 和 SsvepGPT。 [SSVEPformer 与 FB-SSVEPformer](https://arxiv.org/abs/2210.04172) · [EEG-Deformer](https://github.com/yi-ding-cs/EEG-Deformer) · [MTSNet 作者实现](https://github.com/lanzhen19/MTSNet/blob/main/MTSNet.py)
 
 ## 准备数据与运行
 
@@ -30,6 +30,9 @@ python evaluate.py
 | `spiketfnet` | `[9, 采样点]` 和 `[9, 560]`，时域与复频谱双输入 |
 | `eeg-deformer` | `[9, 采样点]`，默认 3 个 HCT 块 |
 | `mtsnet` | `[9, 采样点]` 和 `[9, 560]`，分别编码时域与复频谱，再沿特征轴拼接并融合 |
+| `ssvepgpt` | `[9, 采样点]` 和 `[9, 562]`，用联合自注意力编码时域短片段和各电极的整窗复频谱 |
+
+SsvepGPT 借鉴 SleepGPT 的分域前馈和统一时频注意力，使用 Benchmark 标签和共用交叉熵从头训练。每 25 点生成一个时域 token，每个电极的整窗复频谱生成一个频域 token。频谱使用 8–64 Hz（含两端）、0.2 Hz 网格及 `1 / 窗内采样点数` 缩放。两个域共享电极嵌入，时域另加片段位置嵌入。默认宽度 96、4 个头、3 层，每层均允许跨域注意，前两层分域前馈，最后一层共享前馈。分域平均池化后拼接做 40 类分类。设置见 `configs/ssvepgpt_config.py`。[SleepGPT 官方实现](https://github.com/LordXX505/SleepGPT)
 
 MTSNet 从同一滤波试次取得两路输入。频域分支将波形补零至 1250 点，在 8.0 至 63.8 Hz 每隔 0.2 Hz 取一个频点，乘以 `2 / 窗内采样点数` 后沿末轴拼接实部和虚部。该变换逐试次独立计算。模型默认使用两个时域块（核长 15、31 串联）、两个频域块（核长 31）和两个融合块（核长 31、15、7 并联）。频谱和模型参数见 `configs/mtsnet_config.py`。各折从头训练，使用共用交叉熵。
 
@@ -43,6 +46,14 @@ EEG-Deformer 的输入在 `configs/eeg-deformer_config.py` 中选择。`INPUT_TY
 FB 的子网预训练轮数和联合训练轮数在 `configs/fb-ssvepformer_config.py` 设置。各子网从本折训练被试学习，之后用各自的最佳验证权重开始联合训练。SpikeTFNet 的两个辅助损失权重在 `configs/spiketfnet_config.py` 设置。
 
 `DEVICE = "cpu"` 使用 CPU。`DEVICE = "cuda"` 时，`CUDA_DEVICE_IDS = (0,)` 单卡顺序训练。设为 `(0, 1)` 且选择至少两个模型时，两个独立进程按 `MODELS` 顺序交替分配模型，每次每卡独立训练一个完整模型。只选一个模型并指定双卡时，使用 `DataParallel`。GPU 预热按同一分配规则逐模型测试真实 batch，结果写入 `smoke_test/output/gpu_report.json`。
+
+### SsvepGPT 正式训练前的核对
+
+在本地运行 `python -m smoke_test.check_ssvepgpt`，使用 S1–S3 的真实试次核对两个窗长的复频谱、跨域交互、反向传播和评估。结果写入 `smoke_test/output/ssvepgpt.txt`。
+
+服务器准备好共用 NPZ 后，以正式实验的模型组合、设备编号和 batch 运行 `python -m smoke_test.check_gpu`。只测 SsvepGPT 单卡时，设置 `MODELS = ("ssvepgpt",)`、`CUDA_DEVICE_IDS = (0,)`。每个窗长先跑 3 个预热 batch、再计时 5 个，最后用 1 个 batch 记录算子，均取自首折训练被试，包含反向传播和优化器更新。
+
+正式训练前核对 `smoke_test/output/gpu_report.json` 中的 `models.ssvepgpt`。默认单卡 batch 为 64，时域输入应为 `[64, 9, 125]` 或 `[64, 9, 250]`，频域输入为 `[64, 9, 562]`，输出为 FP32 的 `[64, 40]`。查看两个窗长的 `loss_and_gradients_finite`、batch 耗时中位数及峰值显存。核对 GPU 型号、确定性开关、cuBLAS workspace、FP32 精度设置，再结合 `observed_operators` 中的注意力算子及 `cuda_kernel_examples` 确认该设备实际使用的后端。CUDA 事件不可用时只能核对算子级记录。
 
 ### MTSNet 正式训练前的 GPU 核对
 
