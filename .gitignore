@@ -1,0 +1,7 @@
+/.venv/
+__pycache__/
+*.py[cod]
+/data/
+/data_preprocess/*.npz
+/results/
+/smoke_test/output/

@@ -1,0 +1,9 @@
+--extra-index-url https://download.pytorch.org/whl/cu128
+
+numpy==2.4.6
+scipy==1.18.0
+matplotlib==3.11.0
+filelock==3.29.4
+torch==2.11.0+cu128
+torchvision==0.26.0+cu128
+spikingjelly==0.0.0.0.14
