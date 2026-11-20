@@ -1,5 +1,5 @@
 SETTINGS = {
-    "input_type": "complex_channels",  # complex、complex_channels、amplitude 或 time
+    "input_type": "complex",  # complex、complex_channels、amplitude 或 time
     "fft_resolution": 0.2,
     "spectrum_hz": (8.0, 64.0),
     "include_upper_bin": True,

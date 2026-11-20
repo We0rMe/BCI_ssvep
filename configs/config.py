@@ -2,8 +2,8 @@ from data_preprocess.config import NUM_SUBJECTS, PROJECT_DIR
 
 
 # 实验范围与保存位置
-RESULT_NAME = "benchmark_comparison_mtsnet"  # 结果根目录名称，位于 results 下
-MODELS = ("ssvepformer", "fb-ssvepformer", "spiketfnet", "eeg-deformer", "mtsnet")  # 本次训练的模型
+RESULT_NAME = "benchmark_ssvepformer_eKAN"  # 结果根目录名称，位于 results 下
+MODELS = ("ssvepformer_eKAN", "ssvepformer",)  # 本次训练的模型
 LOSO_FOLDS = NUM_SUBJECTS  # 依次留出 S1 至 S{LOSO_FOLDS}
 SEED = 42  # 单次对照使用一个种子
 VALIDATION_FRACTION = 0.20  # 每折从非测试被试中划出的验证比例
