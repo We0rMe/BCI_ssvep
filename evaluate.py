@@ -2,7 +2,6 @@ import csv
 import io
 import json
 import math
-from importlib import import_module
 from pathlib import Path
 
 import numpy as np
@@ -14,7 +13,7 @@ from data_preprocess import config as data_config
 from data_preprocess.preprocess import window_samples
 from train import (
     atomic_write, check_archive, configure_runtime, fold_directory, input_shapes, loso_splits, model_module,
-    model_devices, parallel_model, prediction_logits, prepare_inputs, read_archive, runtime_details, save_text,
+    experiment_args, model_config, model_devices, parallel_model, prediction_logits, prepare_inputs, read_archive, runtime_details, save_text,
     subject_loader, training_settings,
 )
 
@@ -93,7 +92,8 @@ def evaluate_model(name, archive, plan, checkpoint_dir, output_dir, device, cuda
                 inputs = prepare_inputs(module, archive, count, options)
                 model = module.build_model(input_shapes(inputs), num_classes, options).to(device)
                 network = parallel_model(module, model, cuda_ids)
-            model.load_state_dict(state["best_model"])
+            weight_key = "model" if plan.get("protocol") == "loso_final_epoch" else "best_model"
+            model.load_state_dict(state[weight_key])
             loader = subject_loader(inputs, labels, subject_ids, [subject], settings["BATCH_SIZE"], device)
             logits = predict(network, loader, device)
             correct = int((logits.argmax(axis=1) == labels).sum())
@@ -132,6 +132,8 @@ def legacy_differences(old, new, old_data, shared_data):
     recipe_keys = ("SEED", "BATCH_SIZE", "LEARNING_RATE", "WEIGHT_DECAY", "EPOCHS", "OPTIMIZER")
     if any(old["settings"][key] != new["settings"][key] for key in recipe_keys):
         differences.append("训练配方")
+    if new.get("protocol") == "loso_final_epoch":
+        differences.append("权重选择（旧实验按验证准确率，新实验取末轮）")
     if old["splits"] != new["splits"]:
         differences.append("被试划分")
     old_options = old["models"]["eeg-deformer"]
@@ -205,7 +207,7 @@ def write_comparison(run_dir, all_results):
 
 
 def evaluate_experiment(data_file, run_dir, legacy_run=None, legacy_data_file=None):
-    device, cuda_ids = configure_runtime()
+    _, available_ids = configure_runtime()
     artifacts = run_dir / "artifacts"
     artifacts.mkdir(parents=True, exist_ok=True)
     path = artifacts / "run.json"
@@ -217,25 +219,29 @@ def evaluate_experiment(data_file, run_dir, legacy_run=None, legacy_data_file=No
                 plan = json.loads(path.read_text(encoding="utf-8"))
                 if digest != plan["data_sha256"]:
                     raise ValueError("预处理数据的指纹与训练记录不符，请使用训练时的文件")
+                assignments = model_devices(plan["model_order"], available_ids)
                 for name in plan["model_order"]:
+                    model_plan = {**plan, **plan.get("model_runs", {}).get(name, {})}
                     model_dir = run_dir / name
-                    rows = evaluate_model(name, archive, plan, model_dir, model_dir, device, cuda_ids)
-                    results.append((name, plan, rows, []))
-            elif legacy_run is not None:
-                settings = training_settings()
-                counts = window_samples(data_config.WINDOW_SECONDS)
-                check_archive(archive, counts)
-                plan = {"settings": settings, "window_samples": counts, "num_classes": data_config.NUM_CLASSES,
-                        "runtime": runtime_details(device, cuda_ids), "models": {},
-                        "model_devices": model_devices(config.MODELS, cuda_ids),
-                        "splits": loso_splits(archive["subject_ids"], settings["LOSO_FOLDS"],
-                                              settings["VALIDATION_FRACTION"], settings["SEED"])}
-            else:
+                    device, cuda_ids = configure_runtime(assignments[name])
+                    rows = evaluate_model(name, archive, model_plan, model_dir, model_dir, device, cuda_ids)
+                    results.append((name, model_plan, rows, []))
+            elif legacy_run is None:
                 raise FileNotFoundError(f"找不到训练记录 {path}")
 
             if legacy_run is not None:
-                reference = {**plan, "models": dict(plan["models"])}
-                reference["models"].setdefault("eeg-deformer", import_module("configs.eeg-deformer_config").SETTINGS)
+                eeg_config = model_config("eeg-deformer")
+                device, cuda_ids = configure_runtime(available_ids[:1])
+                reference = next((entry[1] for entry in results if entry[0] == "eeg-deformer"), None)
+                if reference is None:
+                    counts = window_samples(data_config.WINDOW_SECONDS)
+                    check_archive(archive, counts)
+                    reference = {
+                        "protocol": "loso_final_epoch", "settings": training_settings(eeg_config),
+                        "window_samples": counts, "num_classes": data_config.NUM_CLASSES,
+                        "runtime": runtime_details(device, cuda_ids), "models": {"eeg-deformer": eeg_config.SETTINGS},
+                        "splits": loso_splits(archive["subject_ids"], config.LOSO_FOLDS),
+                    }
                 results.append(evaluate_legacy(run_dir, Path(legacy_run), legacy_data_file,
                                                archive, reference, device, cuda_ids))
             write_comparison(run_dir, results)
@@ -243,5 +249,7 @@ def evaluate_experiment(data_file, run_dir, legacy_run=None, legacy_data_file=No
 
 
 if __name__ == "__main__":
-    evaluate_experiment(data_config.OUTPUT_FILE, config.RESULTS_DIR / config.RESULT_NAME,
-                        config.LEGACY_EEG_RUN_DIR, config.LEGACY_EEG_DATA_FILE)
+    _, directory = experiment_args()
+    eeg_config = model_config("eeg-deformer")
+    evaluate_experiment(data_config.OUTPUT_FILE, directory, eeg_config.LEGACY_EEG_RUN_DIR,
+                        eeg_config.LEGACY_EEG_DATA_FILE)

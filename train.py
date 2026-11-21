@@ -1,3 +1,4 @@
+import argparse
 import csv
 import hashlib
 import io
@@ -6,6 +7,7 @@ import math
 import multiprocessing
 import os
 from importlib import import_module
+from pathlib import Path
 from time import perf_counter
 
 import numpy as np
@@ -24,17 +26,45 @@ from data_preprocess.preprocess import start_sample, window_samples
 
 
 EPOCH_COLUMNS = (
-    "epoch", "stage", "stage_epoch", "lr", "train_loss", "train_acc", "val_loss", "val_acc",
-    "train_seconds", "epoch_seconds",
+    "epoch", "stage", "stage_epoch", "lr", "train_loss", "train_acc",
+    "train_seconds",
 )
 
 
-def training_settings():
-    names = (
-        "SEED", "LOSO_FOLDS", "VALIDATION_FRACTION", "EPOCHS", "BATCH_SIZE", "OPTIMIZER",
-        "LEARNING_RATE", "WEIGHT_DECAY", "SGD_MOMENTUM", "ITR_GAZE_SECONDS",
-    )
-    return {name: getattr(config, name) for name in names}
+def training_settings(model_cfg):
+    settings = {
+        "SEED": config.SEED, "LOSO_FOLDS": config.LOSO_FOLDS,
+        "BATCH_SIZE": model_cfg.BATCH_SIZE, "OPTIMIZER": model_cfg.OPTIMIZER,
+        "LEARNING_RATE": model_cfg.LEARNING_RATE, "WEIGHT_DECAY": model_cfg.WEIGHT_DECAY,
+        "SGD_MOMENTUM": model_cfg.SGD_MOMENTUM, "ITR_GAZE_SECONDS": config.ITR_GAZE_SECONDS,
+        "SCHEDULER": model_cfg.SCHEDULER,
+    }
+    if hasattr(model_cfg, "EPOCHS"):
+        settings["EPOCHS"] = model_cfg.EPOCHS
+    return settings
+
+
+def selected_models(models=None):
+    if models is None:
+        models = config.MODELS
+    names = (models,) if isinstance(models, str) else tuple(models)
+    if not names or len(set(names)) != len(names):
+        raise ValueError("--models 至少选一个模型，且不能重复")
+    return names
+
+
+def experiment_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--models", nargs="+", help="临时覆盖 configs/config.py 的 MODELS，按训练顺序列出")
+    parser.add_argument("--run-dir", type=Path, help="覆盖默认实验目录 results/<RESULT_NAME>")
+    args = parser.parse_args()
+    names = selected_models(args.models)
+    directory = args.run_dir or data_config.PROJECT_DIR / "results" / config.RESULT_NAME
+    return names, directory
+
+
+def model_config(name):
+    return import_module(f"configs.{name}_config")
 
 
 def model_module(name):
@@ -161,13 +191,12 @@ def write_epoch(fold_dir, history, state):
     row = history[-1]
     print(f"[{fold_dir.parent.name}/{fold_dir.name}] {row['stage']} {row['stage_epoch']:03d} | "
           f"train loss {row['train_loss']:.4f} ACC {row['train_acc']:.2%} | "
-          f"val loss {row['val_loss']:.4f} ACC {row['val_acc']:.2%} | "
-          f"LR {row['lr']:.3g} | 训练 {row['train_seconds']:.2f}s 本轮 {row['epoch_seconds']:.2f}s", flush=True)
+          f"LR {row['lr']:.3g} | 训练 {row['train_seconds']:.2f}s", flush=True)
     save_curve(fold_dir / "train.png", history)
 
 
-def fold_summary(history, best_epoch):
-    return history[best_epoch - 1]["val_acc"], sum(row["train_seconds"] for row in history)
+def fold_summary(history):
+    return history[-1]["train_acc"], sum(row["train_seconds"] for row in history)
 
 
 def train_fold(module, options, plan, settings, inputs, labels, subject_ids, split, fold_dir, device, cuda_ids):
@@ -182,13 +211,12 @@ def train_fold(module, options, plan, settings, inputs, labels, subject_ids, spl
         save_history(log_file, history)
         save_curve(fold_dir / "train.png", history)
         if state["complete"]:
-            return fold_summary(history, state["best_epoch"])
+            return fold_summary(history)
 
     set_seed(settings["SEED"], cuda_ids)
     shuffle = torch.Generator().manual_seed(settings["SEED"])
     model = module.build_model(input_shapes(inputs), data_config.NUM_CLASSES, options).to(device)
     train_loader = subject_loader(inputs, labels, subject_ids, split["train"], settings["BATCH_SIZE"], device, shuffle)
-    val_loader = subject_loader(inputs, labels, subject_ids, split["validation"], settings["BATCH_SIZE"], device)
     auxiliary_loss = None
     if hasattr(module, "joint_loss"):
         auxiliary_loss = lambda output, targets: module.joint_loss(output, targets, options)
@@ -210,46 +238,39 @@ def train_fold(module, options, plan, settings, inputs, labels, subject_ids, spl
         active = model if band is None else model.subnetworks[band]
         network = parallel_model(module, active, cuda_ids)
         optimizer = make_optimizer(active, settings)
-        scheduler = CosineAnnealingLR(optimizer, T_max=epochs)
-        done, best_epoch, best_model = 0, 0, None
+        scheduler = CosineAnnealingLR(optimizer, T_max=epochs) if settings["SCHEDULER"] == "cosine" else None
+        done = 0
         if state is not None and stage_index == state["stage_index"]:
             optimizer.load_state_dict(state["optimizer"])
-            scheduler.load_state_dict(state["scheduler"])
-            done, best_epoch, best_model = state["stage_epoch"], state["best_epoch"], state["best_model"]
+            if scheduler is not None:
+                scheduler.load_state_dict(state["scheduler"])
+            done = state["stage_epoch"]
 
         for stage_epoch in range(done + 1, epochs + 1):
             lr = optimizer.param_groups[0]["lr"]
             started = perf_counter()
             train_loss, train_acc = run_epoch(network, train_loader, device, optimizer, auxiliary_loss, band)
             train_seconds = perf_counter() - started
-            val_loss, val_acc = run_epoch(network, val_loader, device, None, auxiliary_loss, band)
-            epoch_seconds = perf_counter() - started
-            if not (math.isfinite(train_loss) and math.isfinite(val_loss)):
+            if not math.isfinite(train_loss):
                 raise FloatingPointError(f"{stage} 第 {stage_epoch} 轮出现非有限损失，已保留上一断点")
-            scheduler.step()
+            if scheduler is not None:
+                scheduler.step()
             epoch = len(history) + 1
-            if best_epoch == 0 or val_acc > history[best_epoch - 1]["val_acc"]:
-                best_epoch = epoch
-                best_model = {key: value.detach().to(device="cpu", copy=True)
-                              for key, value in active.state_dict().items()}
-            if band is not None and stage_epoch == epochs:
-                # 联合训练从各子网的最佳验证权重开始。
-                active.load_state_dict(best_model)
             history.append({
                 "epoch": epoch, "stage": stage, "stage_epoch": stage_epoch, "lr": lr,
-                "train_loss": train_loss, "train_acc": train_acc, "val_loss": val_loss, "val_acc": val_acc,
-                "train_seconds": train_seconds, "epoch_seconds": epoch_seconds,
+                "train_loss": train_loss, "train_acc": train_acc,
+                "train_seconds": train_seconds,
             })
             write_epoch(fold_dir, history, {
                 "epoch": epoch, "stage_index": stage_index, "stage_epoch": stage_epoch,
                 "complete": stage_index == len(plan) - 1 and stage_epoch == epochs,
-                "model": model.state_dict(), "best_epoch": best_epoch, "best_model": best_model,
-                "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
+                "model": model.state_dict(),
+                "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict() if scheduler is not None else None,
                 "shuffle_rng": shuffle.get_state(), "torch_rng": torch.get_rng_state(),
                 "cuda_rng": [torch.cuda.get_rng_state(index) for index in cuda_ids],
             })
 
-    return fold_summary(history, best_epoch)
+    return fold_summary(history)
 
 
 def fold_directory(model_dir, samples, subject):
@@ -257,35 +278,35 @@ def fold_directory(model_dir, samples, subject):
 
 
 def write_training_report(model_dir, name, fs, results):
-    lines = [f"# {name} 训练汇总", "", "| 窗长 | 完成折数 | 最佳验证 ACC | 累计训练时间（s） |",
+    lines = [f"# {name} 训练汇总", "", "| 窗长 | 完成折数 | 末轮训练 ACC | 累计训练时间（s） |",
              "| --- | ---: | ---: | ---: |"]
     for count, scores, seconds in results:
         acc = f"{100 * np.mean(scores):.2f}% ± {100 * np.std(scores):.2f} pp"
         lines.append(f"| {count / fs:g} s | {len(scores)} | {acc} | {seconds:.2f} |")
-    lines.extend(("", "验证 ACC 使用折间总体标准差。跨模型的测试指标见 [实验报告](../report.md)。"))
+    lines.extend(("", "末轮训练 ACC 使用折间总体标准差。跨模型的测试指标见 [实验报告](../report.md)。"))
     save_text(model_dir / "report.md", "\n".join(lines) + "\n")
 
 
 def model_devices(names, cuda_ids):
-    if len(cuda_ids) == 2 and len(names) >= 2:
-        return {name: [cuda_ids[index % 2]] for index, name in enumerate(names)}
-    return {name: list(cuda_ids) for name in names}
+    if not cuda_ids:
+        return {name: [] for name in names}
+    return {name: [cuda_ids[index % len(cuda_ids)]] for index, name in enumerate(names)}
 
 
 def train_model(name, manifest, archive, run_dir, device):
     module = model_module(name)
     options = manifest["models"][name]
     plan = manifest["training_plans"][name]
-    settings = manifest["settings"]
+    settings = manifest["model_runs"][name]["settings"]
     cuda_ids = manifest["model_devices"][name]
     subject_ids, labels = archive["subject_ids"], archive["labels"]
     model_dir = run_dir / name
     results = []
-    print(f"{name} 使用 {device}" + (f" 和 cuda:{cuda_ids[1]}" if len(cuda_ids) == 2 else ""), flush=True)
+    print(f"{name} 使用 {device}", flush=True)
     for count in manifest["window_samples"]:
         inputs = prepare_inputs(module, archive, count, options)
         scores, seconds = [], 0.0
-        for split in manifest["splits"]:
+        for split in manifest["model_runs"][name]["splits"]:
             folder = fold_directory(model_dir, count, split["test"])
             print(f"\n{name} / {folder.name}", flush=True)
             acc, elapsed = train_fold(module, options, plan, settings, inputs, labels, subject_ids,
@@ -298,13 +319,13 @@ def train_model(name, manifest, archive, run_dir, device):
 
 
 def train_on_gpu(gpu_id, names, data_file, run_dir, manifest):
-    device, _ = configure_runtime((gpu_id,))
     with data_file.open("rb") as source:
         archive, digest = read_archive(source)
         with archive:
             if digest != manifest["data_sha256"]:
                 raise ValueError("训练期间预处理文件发生变化")
             for name in names:
+                device, _ = configure_runtime((gpu_id,))
                 train_model(name, manifest, archive, run_dir, device)
 
 
@@ -330,19 +351,21 @@ def train_on_two_gpus(data_file, run_dir, manifest, cuda_ids):
         raise RuntimeError(f"模型训练进程退出异常（{', '.join(failed)}），可从已写入的断点恢复")
 
 
-def train_experiment(data_file, run_dir):
-    names = tuple(config.MODELS)
-    if not names or len(set(names)) != len(names):
-        raise ValueError("MODELS 至少选一个模型，且不能重复")
+def train_experiment(data_file, run_dir, names=None):
+    names = selected_models(names)
     modules = {name: model_module(name) for name in names}
-    model_options = {name: import_module(f"configs.{name}_config").SETTINGS for name in names}
-    settings = training_settings()
-    plans = {name: training_plan(modules[name], model_options[name], settings["EPOCHS"]) for name in names}
-    if (settings["OPTIMIZER"] not in ("adam", "sgd")
-            or any(not plan or any(epochs < 1 for _, epochs, _ in plan) for plan in plans.values())):
-        raise ValueError("优化器须为 adam 或 sgd，训练阶段的轮数须为正整数")
+    configs = {name: model_config(name) for name in names}
+    model_options = {name: cfg.SETTINGS for name, cfg in configs.items()}
+    recipes = {name: training_settings(cfg) for name, cfg in configs.items()}
+    plans = {name: training_plan(modules[name], model_options[name], recipes[name].get("EPOCHS")) for name in names}
+    for name, recipe in recipes.items():
+        if recipe["OPTIMIZER"] not in ("adam", "sgd") or recipe["SCHEDULER"] not in ("cosine", "constant"):
+            raise ValueError(f"{name} 的优化器或学习率调度器无效")
+        if not plans[name] or any(not isinstance(n, int) or n < 1 for _, n, _ in plans[name]):
+            raise ValueError(f"{name} 训练阶段的轮数须为正整数")
 
-    device, cuda_ids = configure_runtime()
+    _, cuda_ids = configure_runtime()
+    devices = model_devices(names, cuda_ids)
     counts = window_samples(data_config.WINDOW_SECONDS)
     artifacts = run_dir / "artifacts"
     artifacts.mkdir(parents=True, exist_ok=True)
@@ -352,12 +375,20 @@ def train_experiment(data_file, run_dir):
             check_archive(archive, counts)
             subject_ids = archive["subject_ids"]
             fs = archive["sampling_rate_hz"].item()
-            splits = loso_splits(subject_ids, settings["LOSO_FOLDS"], settings["VALIDATION_FRACTION"], settings["SEED"])
+            model_runs = {}
+            for name in names:
+                device, ids = configure_runtime(devices[name])
+                model_runs[name] = {
+                    "settings": recipes[name],
+                    "splits": loso_splits(subject_ids, recipes[name]["LOSO_FOLDS"]),
+                    "runtime": runtime_details(device, ids),
+                }
             manifest = {
+                "protocol": "loso_final_epoch", "model_runs": model_runs,
                 "data_sha256": digest, "sampling_rate_hz": fs, "num_classes": data_config.NUM_CLASSES,
-                "window_samples": counts, "settings": settings, "model_order": list(names), "models": model_options,
-                "runtime": runtime_details(device, cuda_ids), "splits": splits, "training_plans": plans,
-                "model_devices": model_devices(names, cuda_ids),
+                "window_samples": counts, "model_order": list(names), "models": model_options,
+                "training_plans": plans,
+                "model_devices": devices,
             }
             save_manifest(artifacts / "run.json", manifest)
             report = run_dir / "report.md"
@@ -366,34 +397,23 @@ def train_experiment(data_file, run_dir):
                 save_text(report, "# 实验汇总\n\n训练完成后运行 `evaluate.py` 汇总留出被试的 ACC 和 ITR。\n\n"
                           + "\n".join(links) + "\n")
 
-            if len(cuda_ids) == 2 and len(names) >= 2:
+            if len(cuda_ids) == 2 and len(names) > 1:
                 train_on_two_gpus(data_file, run_dir, manifest, cuda_ids)
             else:
                 for name in names:
+                    device, _ = configure_runtime(devices[name])
                     train_model(name, manifest, archive, run_dir, device)
     print(f"训练汇总已保存到 {run_dir / 'report.md'}", flush=True)
 
 
-def loso_splits(subject_ids, num_folds, validation_fraction, seed):
+def loso_splits(subject_ids, num_folds):
     subjects = sorted(map(int, subject_ids))
+    if len(subjects) < 2 or len(set(subjects)) != len(subjects):
+        raise ValueError("LOSO 至少需要两个不同的被试，且编号不能重复")
     if not 1 <= num_folds <= len(subjects):
         raise ValueError("LOSO 折数须在 1 至被试总数之间")
-    if len(subjects) < 3 or not 0 < validation_fraction < 1:
-        raise ValueError("训练至少需要 3 名被试，验证比例须在 0 和 1 之间")
-
-    num_remaining = len(subjects) - 1
-    num_validation = min(num_remaining - 1, max(1, round(num_remaining * validation_fraction)))
-    rng = np.random.default_rng(seed)
-    splits = []
-    for test_id in subjects[:num_folds]:
-        remaining = [subject_id for subject_id in subjects if subject_id != test_id]
-        shuffled = rng.permutation(remaining).tolist()
-        splits.append({
-            "test": test_id,
-            "train": sorted(shuffled[num_validation:]),
-            "validation": sorted(shuffled[:num_validation]),
-        })
-    return splits
+    return [{"test": test, "train": [subject for subject in subjects if subject != test]}
+            for test in subjects[:num_folds]]
 
 
 def configure_runtime(device_ids=None):
@@ -460,7 +480,7 @@ def save_manifest(path, settings):
     if not path.exists():
         save_text(path, text)
     elif path.read_text(encoding="utf-8") != text:
-        raise ValueError("实验目录已有不同的数据、环境或配置，请恢复原设置或修改 RUN_NAME")
+        raise ValueError("实验目录已有不同的数据、环境或配置，请恢复原设置或更换 RESULT_NAME 或 --run-dir")
 
 
 def save_history(path, history):
@@ -487,9 +507,8 @@ def save_curve(path, history):
     loss_axis, acc_axis = figure.subplots(1, 2)
     epochs = [record["epoch"] for record in history]
     marker = "." if len(epochs) == 1 else None
-    for split, label in (("train", "Train"), ("val", "Validation")):
-        loss_axis.plot(epochs, [row[f"{split}_loss"] for row in history], label=label, marker=marker)
-        acc_axis.plot(epochs, [100 * row[f"{split}_acc"] for row in history], label=label, marker=marker)
+    loss_axis.plot(epochs, [row["train_loss"] for row in history], label="Train", marker=marker)
+    acc_axis.plot(epochs, [100 * row["train_acc"] for row in history], label="Train", marker=marker)
     loss_axis.set(xlabel="Epoch", ylabel="Loss")
     acc_axis.set(xlabel="Epoch", ylabel="Accuracy (%)", ylim=(0, 100))
     for axis in (loss_axis, acc_axis):
@@ -504,4 +523,5 @@ def save_checkpoint(path, state):
 
 
 if __name__ == "__main__":
-    train_experiment(data_config.OUTPUT_FILE, config.RESULTS_DIR / config.RESULT_NAME)
+    names, directory = experiment_args()
+    train_experiment(data_config.OUTPUT_FILE, directory, names)

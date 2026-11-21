@@ -58,7 +58,15 @@ class SsvepGPT(nn.Module):
         self.padding = -samples % self.patch_samples
         patches = (samples + self.padding) // self.patch_samples
         self.time_projection = nn.Linear(self.patch_samples, width)
-        self.spectrum_projection = nn.Linear(features, width)
+        bins = features // 2  # 输入先放实部，再放相同频点的虚部
+        self.spectrum_bands = settings.get("spectrum_bands", 1)  # 旧实验使用整谱投影
+        if features % 2 or not 1 <= self.spectrum_bands <= bins:
+            raise ValueError("复频谱须含成对的实虚部，频带数须介于 1 和频点数之间")
+        self.band_bins = (bins + self.spectrum_bands - 1) // self.spectrum_bands
+        self.spectrum_projection = nn.Linear(2 * self.band_bins, width)
+        if self.spectrum_bands > 1:
+            self.band_embed = nn.Parameter(torch.empty(self.spectrum_bands, width))
+            nn.init.normal_(self.band_embed, std=0.02)
         self.channel_embed = nn.Parameter(torch.empty(channels, width))
         self.position_embed = nn.Parameter(torch.empty(patches, width))
         self.domain_embed = nn.Parameter(torch.empty(2, width))
@@ -73,13 +81,25 @@ class SsvepGPT(nn.Module):
         self.norm = nn.LayerNorm(width)
         self.classifier = nn.Linear(2 * width, num_classes)
 
+    def spectrum_tokens(self, spectrum):
+        if self.spectrum_bands == 1:
+            return self.spectrum_projection(spectrum) + self.channel_embed + self.domain_embed[1]
+
+        # 只切分频率轴。较短频带的实部、虚部分别在末尾补零。
+        paired = spectrum.unflatten(-1, (2, -1))
+        bands = torch.tensor_split(paired, self.spectrum_bands, dim=-1)
+        padded = [F.pad(band, (0, self.band_bins - band.size(-1))) for band in bands]
+        features = torch.stack(padded, dim=2).flatten(-2)  # [批次, 电极, 频带, 实部和虚部]
+        tokens = self.spectrum_projection(features) + self.channel_embed[:, None] + self.band_embed
+        return (tokens + self.domain_embed[1]).flatten(1, 2)
+
     def forward(self, eeg, spectrum):
         if self.padding:
             eeg = F.pad(eeg, (0, self.padding))
         patches = eeg.unfold(-1, self.patch_samples, self.patch_samples)
         time = self.time_projection(patches) + self.channel_embed[:, None] + self.position_embed + self.domain_embed[0]
         time = time.flatten(1, 2)  # 电极优先，每个电极内按时间排列
-        spectrum = self.spectrum_projection(spectrum) + self.channel_embed + self.domain_embed[1]
+        spectrum = self.spectrum_tokens(spectrum)
         tokens = torch.cat((time, spectrum), dim=1)
         time_count = time.size(1)
         for block in self.blocks:

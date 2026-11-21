@@ -1,3 +1,13 @@
+# 本模型的训练超参数
+BATCH_SIZE = 128
+LEARNING_RATE = 1e-3
+EPOCHS = 100
+OPTIMIZER = "sgd"  # adam 或 sgd
+SCHEDULER = "cosine"  # cosine 或 constant
+WEIGHT_DECAY = 1e-5
+SGD_MOMENTUM = 0.9
+
+
 SETTINGS = {
     "input_type": "complex",  # complex、complex_channels、amplitude 或 time
     "fft_resolution": 0.2,

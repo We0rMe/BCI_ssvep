@@ -1,3 +1,13 @@
+# 本模型的训练超参数
+BATCH_SIZE = 64
+LEARNING_RATE = 1e-3
+EPOCHS = 100
+OPTIMIZER = "sgd"  # adam 或 sgd
+SCHEDULER = "cosine"  # cosine 或 constant
+WEIGHT_DECAY = 1e-4
+SGD_MOMENTUM = 0.9
+
+
 SETTINGS = {
     # 同一滤波试次的复频谱，先实部、后虚部。
     "input_type": "complex",

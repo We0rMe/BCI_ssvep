@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+from contextlib import ExitStack
 from importlib import import_module
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -61,10 +62,10 @@ def resume_fb(data_file, reference, interrupted):
             raise KeyboardInterrupt
         save_checkpoint(path, state)
 
-    with patch.object(config, "MODELS", ("fb-ssvepformer",)), patch.object(data_config, "WINDOW_SECONDS", (0.5,)):
+    with patch.object(data_config, "WINDOW_SECONDS", (0.5,)):
         with patch.object(train, "save_checkpoint", interrupt):
             try:
-                train.train_experiment(data_file, interrupted)
+                train.train_experiment(data_file, interrupted, ("fb-ssvepformer",))
             except KeyboardInterrupt:
                 pass
             else:
@@ -73,12 +74,12 @@ def resume_fb(data_file, reference, interrupted):
         cp = interrupted / relative / "checkpoint.pt"
         assert torch.load(cp, weights_only=True)["stage_index"] == 0
         assert len(train.load_history(interrupted / relative / "training.log", 2)) == 2
-        train.train_experiment(data_file, interrupted)
+        train.train_experiment(data_file, interrupted, ("fb-ssvepformer",))
 
     first = torch.load(reference / relative / "checkpoint.pt", weights_only=True)
     resumed = torch.load(cp, weights_only=True)
-    assert resumed["complete"] and resumed["epoch"] == 4 and resumed["best_epoch"] == first["best_epoch"]
-    for key in ("model", "best_model", "optimizer", "scheduler", "torch_rng", "shuffle_rng"):
+    assert resumed["complete"] and resumed["epoch"] == 4
+    for key in ("model", "optimizer", "scheduler", "torch_rng", "shuffle_rng"):
         torch.testing.assert_close(resumed[key], first[key], rtol=0, atol=0)
     assert len((interrupted / relative / "training.log").read_text(encoding="utf-8").splitlines()) == 5
 
@@ -92,10 +93,11 @@ def check_legacy(data_file, run_dir, legacy_dir, legacy_file):
 
     mapping = evaluate.LEGACY_MODEL_KEYS
     options = shared["models"]["eeg-deformer"]
-    old_settings = {**shared["settings"], **{key: options[name] for name, key in mapping.items()}, "NUM_CLASSES": 40}
+    eeg_run = shared["model_runs"]["eeg-deformer"]
+    old_settings = {**eeg_run["settings"], "VALIDATION_FRACTION": 0.2, **{key: options[name] for name, key in mapping.items()}, "NUM_CLASSES": 40}
     old_manifest = {"data_sha256": digest, "sampling_rate_hz": shared["sampling_rate_hz"],
-                    "window_samples": shared["window_samples"], "runtime": shared["runtime"],
-                    "splits": shared["splits"], "settings": old_settings}
+                    "window_samples": shared["window_samples"], "runtime": eeg_run["runtime"],
+                    "splits": [{"test": 1, "train": [2], "validation": [3]}], "settings": old_settings}
     if "input" in options:
         old_manifest["input"] = options["input"]
     (legacy_dir / "artifacts").mkdir(parents=True)
@@ -105,7 +107,7 @@ def check_legacy(data_file, run_dir, legacy_dir, legacy_file):
         state = torch.load(run_dir / "eeg-deformer" / relative, weights_only=True)
         destination = legacy_dir / relative
         destination.parent.mkdir(parents=True)
-        torch.save({"epoch": state["stage_epoch"], "best_model": state["best_model"]}, destination)
+        torch.save({"epoch": state["stage_epoch"], "best_model": state["model"]}, destination)
     evaluate.evaluate_experiment(data_file, run_dir, legacy_dir, legacy_file)
 
     with np.load(run_dir / "eeg-deformer/artifacts/predictions.npz") as current, np.load(
@@ -114,7 +116,7 @@ def check_legacy(data_file, run_dir, legacy_dir, legacy_file):
         for count in (125, 250):
             np.testing.assert_array_equal(historical[f"logits_{count}"], current[f"logits_{count}"])
     provenance = json.loads((run_dir / "eeg-deformer-legacy/artifacts/source.json").read_text(encoding="utf-8"))
-    assert provenance["protocol_differences"] == []
+    assert "被试划分" in provenance["protocol_differences"]
 
 
 def check_extension(data_file, run_dir):
@@ -122,10 +124,11 @@ def check_extension(data_file, run_dir):
     model.prepare_inputs = lambda archive, count, settings: (archive[f"eeg_{count}"],)
     model.build_model = lambda shapes, classes, settings: nn.Sequential(nn.Flatten(), nn.Linear(np.prod(shapes[0]), classes))
     options = ModuleType("configs.example_config")
+    options.__dict__.update({k: v for k, v in vars(train.model_config("mtsnet")).items() if k.isupper()})
     options.SETTINGS = {}
     with (patch.dict("sys.modules", {model.__name__: model, options.__name__: options}),
-          patch.object(config, "MODELS", ("example",)), patch.object(data_config, "WINDOW_SECONDS", (0.5,))):
-        train.train_experiment(data_file, run_dir)
+          patch.object(data_config, "WINDOW_SECONDS", (0.5,))):
+        train.train_experiment(data_file, run_dir, ("example",))
         evaluate.evaluate_experiment(data_file, run_dir)
     assert (run_dir / "example/artifacts/predictions.npz").is_file()
 
@@ -137,7 +140,7 @@ def record_worker(gpu_id, names, _data_file, run_dir, _manifest):
 def check_two_gpu_schedule(root):
     assignments = train.model_devices(MODEL_NAMES, [0, 1])
     assert assignments == dict(zip(MODEL_NAMES, ([0], [1], [0], [1], [0]), strict=True))
-    assert train.model_devices(("eeg-deformer",), [0, 1]) == {"eeg-deformer": [0, 1]}
+    assert train.model_devices(("eeg-deformer",), [0, 1]) == {"eeg-deformer": [0]}
     with patch.object(train, "train_on_gpu", record_worker):
         train.train_on_two_gpus(root / "benchmark.npz", root, {"model_devices": assignments}, [0, 1])
     first, second = [json.loads((root / f"gpu_{index}.json").read_text(encoding="utf-8")) for index in (0, 1)]
@@ -146,6 +149,11 @@ def check_two_gpu_schedule(root):
 
 
 def main():
+    subjects = set(range(1, 36))
+    splits = train.loso_splits(sorted(subjects), 35)
+    assert {fold["test"] for fold in splits} == subjects
+    for fold in splits:
+        assert len(fold["train"]) == 34 and set(fold["train"]) == subjects - {fold["test"]}
     output = data_config.PROJECT_DIR / "smoke_test" / "output"
     output.mkdir(parents=True, exist_ok=True)
     torch.set_num_threads(1)
@@ -158,9 +166,24 @@ def main():
         make_small_data(data_file)
         check_mtsnet(data_file)
         with (patch.object(data_config, "NUM_SUBJECTS", 3),
-              patch.multiple(config, MODELS=MODEL_NAMES, DEVICE="cpu", BATCH_SIZE=4, EPOCHS=1, LOSO_FOLDS=1),
+              patch.multiple(config, MODELS=MODEL_NAMES, DEVICE="cpu", LOSO_FOLDS=1, SEED=123),
+              ExitStack() as configs,
               patch.dict(fb.SETTINGS, {"pretrain_epochs": 1, "joint_epochs": 1})):
+            for name in MODEL_NAMES:
+                cfg = train.model_config(name)
+                overrides = {"BATCH_SIZE": 4}
+                if hasattr(cfg, "EPOCHS"):
+                    overrides["EPOCHS"] = 1
+                configs.enter_context(patch.multiple(cfg, **overrides))
+            configs.enter_context(patch.multiple(train.model_config("mtsnet"), OPTIMIZER="sgd", SCHEDULER="constant", EPOCHS=2))
+            with patch("sys.argv", ["train.py"]):
+                assert train.experiment_args()[0] == MODEL_NAMES
             train.train_experiment(data_file, run_dir)
+            manifest = json.loads((run_dir / "artifacts/run.json").read_text(encoding="utf-8"))
+            for name in MODEL_NAMES:
+                assert manifest["model_runs"][name]["settings"]["SEED"] == 123
+                assert manifest["model_runs"][name]["splits"] == [{"test": 1, "train": [2, 3]}]
+            assert manifest["training_plans"]["mtsnet"] == [["main", 2, None]]
             resume_fb(data_file, run_dir, root / "interrupted")
             check_legacy(data_file, run_dir, root / "legacy", root / "legacy.npz")
             check_extension(data_file, root / "extension")

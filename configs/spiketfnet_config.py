@@ -1,3 +1,13 @@
+# 本模型的训练超参数
+BATCH_SIZE = 64
+LEARNING_RATE = 1e-3
+EPOCHS = 200
+OPTIMIZER = "adam"  # adam 或 sgd
+SCHEDULER = "cosine"  # cosine 或 constant
+WEIGHT_DECAY = 1e-5
+SGD_MOMENTUM = 0.9
+
+
 SETTINGS = {
     "lambda_spectral": 0.3,  # 频域分支辅助交叉熵权重
     "lambda_temporal": 0.3,  # 时域分支辅助交叉熵权重

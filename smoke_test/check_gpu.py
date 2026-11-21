@@ -1,6 +1,5 @@
 import json
 import statistics
-from importlib import import_module
 from time import perf_counter
 
 import numpy as np
@@ -11,8 +10,8 @@ from configs import config
 from data_preprocess import config as data_config
 from data_preprocess.preprocess import window_samples
 from train import (
-    batch_step, check_archive, configure_runtime, input_shapes, loso_splits, make_optimizer, model_devices,
-    model_module, parallel_model, prepare_inputs, runtime_details, set_seed, subject_loader, training_settings,
+    batch_step, check_archive, configure_runtime, input_shapes, loso_splits, make_optimizer, experiment_args, model_devices,
+    model_module, parallel_model, prepare_inputs, runtime_details, model_config, set_seed, subject_loader, training_settings,
 )
 
 
@@ -89,22 +88,25 @@ def probe(module, options, inputs, labels, subject_ids, split, device, cuda_ids,
 
 
 def main():
+    names, _ = experiment_args()
     if config.DEVICE != "cuda" or config.GPU_WARMUP_BATCHES < 0 or config.GPU_PROBE_BATCHES < 1:
         raise ValueError("GPU 预热须设置 CUDA，且至少有一个计时 batch")
     _, cuda_ids = configure_runtime()
-    assignments = model_devices(config.MODELS, cuda_ids)
+    assignments = model_devices(names, cuda_ids)
     counts = window_samples(data_config.WINDOW_SECONDS)
-    settings = training_settings()
-    report = {"warmup_batches": config.GPU_WARMUP_BATCHES, "timed_batches": config.GPU_PROBE_BATCHES, "models": {}}
+    report = {"models": {}}
     with np.load(data_config.OUTPUT_FILE, allow_pickle=False) as archive:
         check_archive(archive, counts)
         subject_ids, labels = archive["subject_ids"], archive["labels"]
-        split = loso_splits(subject_ids, 1, settings["VALIDATION_FRACTION"], settings["SEED"])[0]
-        for name in config.MODELS:
+        split = loso_splits(subject_ids, 1)[0]
+        for name in names:
+            model_cfg = model_config(name)
+            settings = training_settings(model_cfg)
             module = model_module(name)
-            options = import_module(f"configs.{name}_config").SETTINGS
+            options = model_cfg.SETTINGS
             device, assigned = configure_runtime(assignments[name])
-            results = {"runtime": runtime_details(device, assigned), "windows": {}}
+            results = {"warmup_batches": config.GPU_WARMUP_BATCHES, "timed_batches": config.GPU_PROBE_BATCHES,
+                       "runtime": runtime_details(device, assigned), "windows": {}}
             for count in counts:
                 print(f"正在检查 {name} / {count}pt / {assigned}", flush=True)
                 inputs = prepare_inputs(module, archive, count, options)

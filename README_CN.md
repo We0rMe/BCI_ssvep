@@ -25,39 +25,49 @@ python evaluate.py
 
 | 模型 | 默认输入（省略批次轴） |
 | --- | --- |
-| `ssvepformer` | `[18, 281]`，复频谱实部与虚部沿通道轴拼接 |
-| `fb-ssvepformer` | `[3, 18, 281]`，三个子带各自做复频谱变换 |
+| `ssvepformer` | `[9, 562]`，复频谱实部与虚部沿频率轴拼接 |
+| `ssvepformer_eKAN` | `[9, 562]`，使用 eKAN 分类头 |
+| `fb-ssvepformer` | `[3, 9, 562]`，三个子带各自做复频谱变换 |
 | `spiketfnet` | `[9, 采样点]` 和 `[9, 560]`，时域与复频谱双输入 |
 | `eeg-deformer` | `[9, 采样点]`，默认 3 个 HCT 块 |
 | `mtsnet` | `[9, 采样点]` 和 `[9, 560]`，分别编码时域与复频谱，再沿特征轴拼接并融合 |
 | `ssvepgpt` | `[9, 采样点]` 和 `[9, 562]`，用联合自注意力编码时域短片段和各电极的整窗复频谱 |
 
-SsvepGPT 借鉴 SleepGPT 的分域前馈和统一时频注意力，使用 Benchmark 标签和共用交叉熵从头训练。每 25 点生成一个时域 token，每个电极的整窗复频谱生成一个频域 token。频谱使用 8–64 Hz（含两端）、0.2 Hz 网格及 `1 / 窗内采样点数` 缩放。两个域共享电极嵌入，时域另加片段位置嵌入。默认宽度 96、4 个头、3 层，每层均允许跨域注意，前两层分域前馈，最后一层共享前馈。分域平均池化后拼接做 40 类分类。设置见 `configs/ssvepgpt_config.py`。[SleepGPT 官方实现](https://github.com/LordXX505/SleepGPT)
+SsvepGPT 借鉴 SleepGPT 的分域前馈和统一时频注意力，使用 Benchmark 标签和共用交叉熵从头训练。每 25 点生成一个时域 token。每个电极在整窗上计算复频谱，保留 8–64 Hz（含两端）、0.2 Hz 网格及 `1 / 窗内采样点数` 缩放。默认将 281 个频点依次分成 71、70、70、70 点的四带，带内配对实部和虚部，各带共用线性投影并加上可学习的频带位置嵌入。九个电极共生成 36 个频域 token。两个域共享电极嵌入，时域另加片段位置嵌入。模型宽度 48、4 个头、3 层，每层均允许跨域注意，前两层分域前馈，最后一层共享前馈。分域平均池化后拼接做 40 类分类。模型配置中的 `spectrum_bands = 1` 可复用整谱投影，评估旧实验时按其运行清单构建模型。[SleepGPT 官方实现](https://github.com/LordXX505/SleepGPT)
 
 MTSNet 从同一滤波试次取得两路输入。频域分支将波形补零至 1250 点，在 8.0 至 63.8 Hz 每隔 0.2 Hz 取一个频点，乘以 `2 / 窗内采样点数` 后沿末轴拼接实部和虚部。该变换逐试次独立计算。模型默认使用两个时域块（核长 15、31 串联）、两个频域块（核长 31）和两个融合块（核长 31、15、7 并联）。频谱和模型参数见 `configs/mtsnet_config.py`。各折从头训练，使用共用交叉熵。
 
 EEG-Deformer 的输入在 `configs/eeg-deformer_config.py` 中选择。`INPUT_TYPE = "time"` 保留时域基线。
-设为 `"complex_channels"` 后，对每个已滤波的试次独立做实数 FFT，按原窗采样点数归一化，在 8–64 Hz 每隔 0.2 Hz 取一个频点（含两端）。九通道实部在前、九通道虚部在后，输入形状为 `[18, 281]`。设为 `"complex"` 时，每个通道沿最后一轴拼接实部和虚部，形状为 `[9, 562]`。切换表示时在共用配置中另设 `RESULT_NAME`，可以直接复用已有预处理文件。评估按该次实验保存的输入设置加载模型，ITR 仍按实际裁窗时长计算。
+设为 `"complex_channels"` 后，对每个已滤波的试次独立做实数 FFT，按原窗采样点数归一化，在 8–64 Hz 每隔 0.2 Hz 取一个频点（含两端）。九通道实部在前、九通道虚部在后，输入形状为 `[18, 281]`。设为 `"complex"` 时，每个通道沿最后一轴拼接实部和虚部，形状为 `[9, 562]`。切换表示时用 `--run-dir` 指定新的结果目录，可以直接复用已有预处理文件。评估按该次实验保存的输入设置加载模型，ITR 仍按实际裁窗时长计算。
 
 ## 训练设置
 
-`configs/config.py` 集中修改 `RESULT_NAME`、`MODELS`、LOSO 折数、随机种子，以及 batch、优化器、学习率和基础轮数。窗长在 `data_preprocess/config.py` 配置。首 `N` 折依次留出 S1 至 SN 作为最终测试，每折从其余被试中固定抽取约 20% 做验证。所有模型和窗长使用同一份划分，按验证 ACC 保存最佳权重。
+每折留出一名被试用于测试，其余 34 名被试的全部试次参与训练。默认运行 35 折；将共用配置中的 `LOSO_FOLDS` 设为 N，只运行依次留出 S1 至 SN 的前 N 折，每折仍用其余 34 人训练。每折从头训练到配置的轮数，测试使用末轮权重。测试 ACC 和 ITR 由 `evaluate.py` 单独计算。
 
-FB 的子网预训练轮数和联合训练轮数在 `configs/fb-ssvepformer_config.py` 设置。各子网从本折训练被试学习，之后用各自的最佳验证权重开始联合训练。SpikeTFNet 的两个辅助损失权重在 `configs/spiketfnet_config.py` 设置。
+模型选择（`MODELS`）、设备、随机种子、LOSO 折数、确定性与 TF32 开关、ITR 附加时长和 GPU 预热与计时批数都在 `configs/config.py` 中设置。
 
-`DEVICE = "cpu"` 使用 CPU。`DEVICE = "cuda"` 时，`CUDA_DEVICE_IDS = (0,)` 单卡顺序训练。设为 `(0, 1)` 且选择至少两个模型时，两个独立进程按 `MODELS` 顺序交替分配模型，每次每卡独立训练一个完整模型。只选一个模型并指定双卡时，使用 `DataParallel`。GPU 预热按同一分配规则逐模型测试真实 batch，结果写入 `smoke_test/output/gpu_report.json`。
+每个模型的结构和训练超参数在 `configs/<模型名>_config.py`。可分别调整 batch、优化器（Adam 或 SGD）、动量、权重衰减、学习率、调度器（余弦退火或固定学习率）和训练轮数。FB 复用 SSVEPformer 的子网结构参数，在自己的配置文件中设置训练参数、各子网预训练轮数和联合训练轮数。联合训练从各子网末轮权重开始。SpikeTFNet 的辅助损失权重在其自身配置文件设置。
+
+直接运行 `python train.py` 会训练 `MODELS` 中的模型。`--models` 可以为单次运行覆盖该列表。以下命令将两个模型的结果保存在同一实验目录，每个模型按自己的配置训练。评估读取该目录中实验清单所列的模型、训练配方、输入设置和被试划分。
+
+```text
+python train.py --models mtsnet eeg-deformer --run-dir results/comparison
+python evaluate.py --run-dir results/comparison
+```
+
+配置 `DEVICE = "cpu"` 使用 CPU，`DEVICE = "cuda"` 时通过 `CUDA_DEVICE_IDS` 选择一张或两张显卡。例如 `CUDA_DEVICE_IDS = (0, 1)` 时，第 1、3 个模型在卡 0 上依次训练，第 2、4 个模型在卡 1 上依次训练，两张卡各用一个进程并行工作。只选一个模型时使用第一张卡。GPU 预热使用相同的模型选择与设备分配规则。
 
 ### SsvepGPT 正式训练前的核对
 
 在本地运行 `python -m smoke_test.check_ssvepgpt`，使用 S1–S3 的真实试次核对两个窗长的复频谱、跨域交互、反向传播和评估。结果写入 `smoke_test/output/ssvepgpt.txt`。
 
-服务器准备好共用 NPZ 后，以正式实验的模型组合、设备编号和 batch 运行 `python -m smoke_test.check_gpu`。只测 SsvepGPT 单卡时，设置 `MODELS = ("ssvepgpt",)`、`CUDA_DEVICE_IDS = (0,)`。每个窗长先跑 3 个预热 batch、再计时 5 个，最后用 1 个 batch 记录算子，均取自首折训练被试，包含反向传播和优化器更新。
+服务器准备好共用 NPZ 后，以正式实验的模型组合、设备编号和 batch 运行 `python -m smoke_test.check_gpu`。只测 SsvepGPT 单卡时，运行 `python -m smoke_test.check_gpu --models ssvepgpt`，在共用配置中设置 `CUDA_DEVICE_IDS = (0,)`。每个窗长先跑 3 个预热 batch、再计时 5 个，最后用 1 个 batch 记录算子，均取自首折训练被试，包含反向传播和优化器更新。
 
 正式训练前核对 `smoke_test/output/gpu_report.json` 中的 `models.ssvepgpt`。默认单卡 batch 为 64，时域输入应为 `[64, 9, 125]` 或 `[64, 9, 250]`，频域输入为 `[64, 9, 562]`，输出为 FP32 的 `[64, 40]`。查看两个窗长的 `loss_and_gradients_finite`、batch 耗时中位数及峰值显存。核对 GPU 型号、确定性开关、cuBLAS workspace、FP32 精度设置，再结合 `observed_operators` 中的注意力算子及 `cuda_kernel_examples` 确认该设备实际使用的后端。CUDA 事件不可用时只能核对算子级记录。
 
 ### MTSNet 正式训练前的 GPU 核对
 
-在服务器的 `configs/config.py` 中选定正式实验的模型、设备和 batch。仅测 MTSNet 单卡性能时，使用 `MODELS = ("mtsnet",)` 和 `CUDA_DEVICE_IDS = (0,)`。在目标 4090 D 上准备好共用 NPZ 后，先单独运行 `python -m smoke_test.check_gpu`。默认对每个窗长取首折训练被试的真实 batch，预热 3 次、计时 5 次，再单独采样一次算子。每次均执行前向、交叉熵、反向和优化器更新。
+在 `configs/config.py` 中选定 MTSNet 和设备，在 `configs/mtsnet_config.py` 中设置 batch。单卡使用 `CUDA_DEVICE_IDS = (0,)`。在目标 4090 D 上准备好共用 NPZ 后，先单独运行 `python -m smoke_test.check_gpu`。默认对每个窗长取首折训练被试的真实 batch，预热 3 次、计时 5 次，再单独采样一次算子。每次均执行前向、交叉熵、反向和优化器更新。
 
 正式 LOSO 前，将 `smoke_test/output/gpu_report.json` 中的 `models.mtsnet` 发回核对。
 
@@ -67,10 +77,10 @@ FB 的子网预训练轮数和联合训练轮数在 `configs/fb-ssvepformer_conf
 
 ## 结果与断点
 
-`RESULT_NAME` 对应 `results/` 下的一个结果目录。实验根目录的 `report.md` 给出跨模型测试 ACC 与 ITR，每个模型目录保留训练汇总和详细产物。
+在 `configs/config.py` 中设置 `RESULT_NAME`。训练默认写入 `results/<RESULT_NAME>/`，评估默认从同一目录读取。命令行 `--run-dir` 可临时覆盖该路径。实验根目录的 `report.md` 给出跨模型测试 ACC 与 ITR，每个模型目录保留训练汇总和详细产物。
 
 ```text
-results/<RESULT_NAME>/
+results/benchmark_loso34/
 ├── report.md
 ├── artifacts/run.json
 └── <模型名>/
@@ -85,17 +95,17 @@ results/<RESULT_NAME>/
             └── checkpoint.pt
 ```
 
-每个 epoch 保存 Loss、ACC、学习率、训练耗时和训练加验证耗时，并更新曲线。同名实验重复执行 `python train.py` 会从上一个已提交的 epoch 恢复，已完成的折会跳过。FB 的 checkpoint 还记录训练阶段。数据、设备或训练配置有变时，使用新的 `RESULT_NAME`。
+每个 epoch 保存 Loss、ACC、学习率和训练耗时，并更新曲线。同名实验重复执行 `python train.py` 会从上一个已提交的 epoch 恢复，已完成的折会跳过。FB 的 checkpoint 还记录训练阶段。数据、设备或训练配置有变时，更换 `RESULT_NAME` 或通过 `--run-dir` 选择新目录。
 
-`evaluate.py` 只读取已完成的折和最佳验证权重。逐被试计算 ACC、ITR，再按模型和窗长汇总均值 ± 总体标准差。ITR 的选择时间取 `d + 0.5 s`，准确率低于或等于机会水平时记为 0。计划折数全完成后显示汇总值。
+`evaluate.py` 只评估已完成的折。新实验加载末轮权重，历史实验按原协议加载最佳验证权重。逐被试计算 ACC、ITR，再按模型和窗长汇总均值 ± 总体标准差。ITR 的选择时间取 `d + 0.5 s`，准确率低于或等于机会水平时记为 0。计划折数全完成后显示汇总值。
 
 ## 使用旧 EEG-Deformer 权重
 
-需要复用旧运行时，在 `configs/config.py` 将 `LEGACY_EEG_RUN_DIR` 填为旧实验根目录，例如 `r"I:\jjh\SSVEP\EEG-Deformer\results\eeg_deformer_seed42"`。若旧预处理文件已移动，再填写 `LEGACY_EEG_DATA_FILE`。可以在 `MODELS` 中只训练其他模型，使用 `evaluate.py` 读取旧运行的 `artifacts/run.json`、原始预处理 NPZ 和各折 `checkpoint.pt`，并将结果写入 `eeg-deformer-legacy/`。评估会核对数据指纹、训练口径和各折被试。存在口径差异的旧结果在根报告中单列。
+需要复用旧运行时，在 `configs/eeg-deformer_config.py` 将 `LEGACY_EEG_RUN_DIR` 填为旧实验根目录，例如 `r"I:\jjh\SSVEP\EEG-Deformer\results\eeg_deformer_seed42"`。若旧预处理文件已移动，再填写 `LEGACY_EEG_DATA_FILE`。可以通过 `--models`只训练其他模型，使用 `evaluate.py` 读取旧运行的 `artifacts/run.json`、原始预处理 NPZ 和各折 `checkpoint.pt`，并将结果写入 `eeg-deformer-legacy/`。评估会核对数据指纹、训练口径和各折被试。存在口径差异的旧结果在根报告中单列。
 
 ## 接入新模型
 
-新增 `models/<模型名>.py` 和 `configs/<模型名>_config.py`，在后一个文件中提供 `SETTINGS` 字典，再将模型名写进 `MODELS`。新模型提供两个函数。
+新增 `models/<模型名>.py` 和 `configs/<模型名>_config.py`，参照 MTSNet 配置提供本模型的训练参数和结构参数字典 `SETTINGS`，将模型名加入共用配置的 `MODELS` 或通过 `--models` 传入。新模型提供两个函数。
 
 - `prepare_inputs(archive, count, settings)` 返回一个或多个 NumPy 输入数组组成的元组。每个数组的前两轴是 `[被试, 试次]`。从 `eeg_{count}` 读取共同滤波波形，从 `raw_{count}` 读取原始裁窗。需要 FFT 或子带滤波时可调用 `data_preprocess/features.py`。
 - `build_model(shapes, num_classes, settings)` 接收各输入数组去掉前两轴后的形状，返回一个 `nn.Module`。`forward` 接收对应数量的输入张量，返回分类 logits 或包含 `logits` 的字典。联合损失可通过 `joint_loss(output, labels, settings)` 提供。FB 的阶段配置可参考其 `training_plan(settings)`。

@@ -72,16 +72,18 @@ class MTSNet(nn.Module):
         if len(kernels) != 3 or any(k < 1 or k % 2 == 0 for k in kernels):
             raise ValueError("MTSNet 使用三个正奇数卷积核以保持特征长度")
 
-        self.temporal = nn.Sequential(
-            conv_features(channels, width, samples, 1, dropout),
-            *(ConvformerBlock(samples, TemporalMixer(width, samples, kernels, dropout), dropout)
-              for _ in range(settings["branch_depth"])),
-        )
-        self.spectral = nn.Sequential(
-            conv_features(channels, width, features, 1, dropout),
-            *(ConvformerBlock(features, conv_features(width, width, features, kernels[0], dropout), dropout)
-              for _ in range(settings["branch_depth"])),
-        )
+        time_embedding = conv_features(channels, width, samples, 1, dropout)
+        spectral_embedding = conv_features(channels, width, features, 1, dropout)
+        time_blocks = [
+            ConvformerBlock(samples, TemporalMixer(width, samples, kernels, dropout), dropout)
+            for _ in range(settings["branch_depth"])
+        ]
+        spectral_blocks = [
+            ConvformerBlock(features, conv_features(width, width, features, kernels[0], dropout), dropout)
+            for _ in range(settings["branch_depth"])
+        ]
+        self.temporal = nn.Sequential(time_embedding, *time_blocks)
+        self.spectral = nn.Sequential(spectral_embedding, *spectral_blocks)
         self.fusion = nn.Sequential(*(
             ConvformerBlock(length, FusionMixer(width, length, kernels, dropout), dropout)
             for _ in range(settings["fusion_depth"])
@@ -91,12 +93,21 @@ class MTSNet(nn.Module):
             nn.Flatten(), nn.Dropout(dropout), nn.Linear(width * length, hidden),
             nn.LayerNorm(hidden), nn.GELU(), nn.Dropout(0.5), nn.Linear(hidden, num_classes),
         )
-        for layer in self.modules():
-            if isinstance(layer, (nn.Conv1d, nn.Linear)):
-                nn.init.normal_(layer.weight, std=0.01)
+        # 与作者源码按相同顺序抽取初始权重。
+        for part in (time_embedding, spectral_embedding, *time_blocks, *spectral_blocks, self.fusion, self.classifier):
+            for layer in part.modules():
+                if isinstance(layer, (nn.Conv1d, nn.Linear)):
+                    nn.init.normal_(layer.weight, std=0.01)
 
     def forward(self, eeg, spectrum):
-        features = torch.cat((self.temporal(eeg), self.spectral(spectrum)), dim=-1)
+        # 先做两路投影，再依次编码，使各层 Dropout 的调用顺序与作者一致。
+        eeg = self.temporal[0](eeg)
+        spectrum = self.spectral[0](spectrum)
+        for index in range(1, len(self.temporal)):
+            eeg = self.temporal[index](eeg)
+        for index in range(1, len(self.spectral)):
+            spectrum = self.spectral[index](spectrum)
+        features = torch.cat((eeg, spectrum), dim=-1)
         return self.classifier(self.fusion(features))
 
 
