@@ -19,9 +19,16 @@ python train.py
 python evaluate.py
 ```
 
-原始数据默认位于 `data/benchmark/`，需要 `S1.mat` 至 `S35.mat`、`64-channels.loc` 和 `Freq_Phase.mat`。在 `data_preprocess/config.py` 修改原始数据路径和 `WINDOW_SECONDS`。脚本生成 `data_preprocess/benchmark.npz`，其中含被试编号、每个试次的区块和目标索引、类别对应的频率与相位，以及各窗长的原始和滤波波形。
+原始数据默认位于 `data/benchmark/`，需要 `S1.mat` 至 `S35.mat`、`64-channels.loc` 和 `Freq_Phase.mat`。在 `data_preprocess/config.py` 修改原始数据路径和 `WINDOW_SECONDS`。运行 `python -m data_preprocess.preprocess` 可生成下表中的两个文件。
 
-所有模型共用 250 Hz、九个通道和 `[0.64, 0.64+d)` 的截窗规则。各窗长独立截取，随后逐试次做 8–64 Hz、原型阶数为 4 的巴特沃斯双向滤波。FB 直接对同一原始裁窗做三个 Chebyshev-I 子带滤波。不同模型的输入变换在每个窗长下准备一次，供所有折复用。
+在 `configs/config.py` 中设置 `PREPROCESS_IDS`，训练和评估共用这项选择。默认 `(1,)` 使用原流程，`(2,)` 使用整试次滤波，`(1, 2)` 依次独立运行两次。表中的实验根目录由 `RESULT_NAME` 或 `--run-dir` 指定。
+
+| 编号 | 预处理顺序 | 数据文件（位于 data_preprocess） | 训练、断点与评估目录 |
+|---|---|---|---|
+| 1 | 先截取分类窗，再在窗内滤波 | `benchmark.npz` | 实验根目录 |
+| 2 | 先在整条 6 秒试次上滤波，再截取分类窗 | `benchmark_full_trial.npz` | 实验根目录下的 `preprocess_2/` |
+
+两种数据使用相同的九个通道、250 Hz 采样率、试次标签和 `[0.64, 0.64+d)` 分类窗。常规输入采用原型阶数为 4 的 8–64 Hz 巴特沃斯双向滤波。编号 2 的滤波会用到分类窗前后的同一试次数据。FB 在准备模型输入时对原始波形应用自己的 Chebyshev-I 子带滤波器，并遵循所选的滤波与截窗顺序。
 
 | 模型 | 默认输入（省略批次轴） |
 | --- | --- |
@@ -43,6 +50,8 @@ EEG-Deformer 的输入在 `configs/eeg-deformer_config.py` 中选择。`INPUT_TY
 ## 训练设置
 
 每折留出一名被试用于测试，其余 34 名被试的全部试次参与训练。默认运行 35 折；将共用配置中的 `LOSO_FOLDS` 设为 N，只运行依次留出 S1 至 SN 的前 N 折，每折仍用其余 34 人训练。每折从头训练到配置的轮数，测试使用末轮权重。测试 ACC 和 ITR 由 `evaluate.py` 单独计算。
+
+普通 SSVEPformer 使用固定学习率 0.001、SGD 动量 0.9、L2 系数 0.001、batch 128 和 100 轮训练。L2 惩罚由 SGD 的 `weight_decay` 实现。重训时请使用新的实验目录，以保留采用原训练配方的结果。
 
 模型选择（`MODELS`）、设备、随机种子、LOSO 折数、确定性与 TF32 开关、ITR 附加时长和 GPU 预热与计时批数都在 `configs/config.py` 中设置。
 

@@ -73,6 +73,14 @@ def model_module(name):
     return import_module(f"models.{name}")
 
 
+def archive_method(archive, expected=None):
+    # 早期 benchmark.npz 只支持先截窗，保留其文件格式和 SHA-256。
+    method = np.asarray(archive.get("preprocess_id", 1)).item()
+    if method not in data_config.OUTPUT_FILES or (expected is not None and expected != method):
+        raise ValueError(f"预处理文件编号 {method} 与配置不符（期望 {expected}）")
+    return int(method)
+
+
 def check_archive(archive, counts):
     expected = {
         "subject_ids": list(range(1, data_config.NUM_SUBJECTS + 1)),
@@ -84,6 +92,8 @@ def check_archive(archive, counts):
     }
     mismatched = [key for key, value in expected.items() if archive[key].tolist() != value]
     missing = {f"{kind}_{count}" for kind in ("eeg", "raw") for count in counts}.difference(archive.files)
+    if archive_method(archive) == 2:
+        missing.update({f"raw_trials_s{s}" for s in archive["subject_ids"]}.difference(archive.files))
     if mismatched or missing:
         fields = ", ".join(mismatched + sorted(missing))
         raise ValueError(f"预处理文件与当前配置不符（{fields}），请重新执行预处理")
@@ -351,7 +361,7 @@ def train_on_two_gpus(data_file, run_dir, manifest, cuda_ids):
         raise RuntimeError(f"模型训练进程退出异常（{', '.join(failed)}），可从已写入的断点恢复")
 
 
-def train_experiment(data_file, run_dir, names=None):
+def train_experiment(data_file, run_dir, names=None, preprocess_id=None):
     names = selected_models(names)
     modules = {name: model_module(name) for name in names}
     configs = {name: model_config(name) for name in names}
@@ -372,6 +382,7 @@ def train_experiment(data_file, run_dir, names=None):
     with FileLock(artifacts / "run.lock", timeout=0), data_file.open("rb") as source:
         archive, digest = read_archive(source)
         with archive:
+            method = archive_method(archive, preprocess_id)
             check_archive(archive, counts)
             subject_ids = archive["subject_ids"]
             fs = archive["sampling_rate_hz"].item()
@@ -390,6 +401,8 @@ def train_experiment(data_file, run_dir, names=None):
                 "training_plans": plans,
                 "model_devices": devices,
             }
+            if method == 2:
+                manifest["preprocess_id"] = method
             save_manifest(artifacts / "run.json", manifest)
             report = run_dir / "report.md"
             if not report.exists():
@@ -524,4 +537,5 @@ def save_checkpoint(path, state):
 
 if __name__ == "__main__":
     names, directory = experiment_args()
-    train_experiment(data_config.OUTPUT_FILE, directory, names)
+    for method, data_file, run_dir in config.experiment_datasets(directory):
+        train_experiment(data_file, run_dir, names, method)

@@ -1,13 +1,9 @@
-"""同一次 Benchmark 实验中各模型共用的运行设置。"""
+from data_preprocess.config import NUM_SUBJECTS, OUTPUT_FILES
 
-from data_preprocess.config import NUM_SUBJECTS
-
-
-# 按此顺序训练；单次运行可通过 --models 覆盖。
 # 可选模型：mtsnet、ssvepformer、fb-ssvepformer、ssvepformer_eKAN、
-# spiketfnet、eeg-deformer、ssvepgpt。例如 MODELS = ("mtsnet", "eeg-deformer")
-MODELS = ("eeg-deformer", "mtsnet", "ssvepformer_eKAN", "ssvepformer", "ssvepgpt")
-RESULT_NAME = "benchmark_loso34"  # 本次实验的结果目录名，训练和评估均使用 results/<RESULT_NAME>/
+MODELS = ("eeg-deformer", "mtsnet", "ssvepformer_eKAN", "ssvepformer")
+PREPROCESS_IDS = (2,)  # (1,) 先截窗；(2,) 整试次先滤波；(1, 2) 依次独立运行
+RESULT_NAME = "benchmark_preprocess2"  # 本次实验的结果目录名，训练和评估均使用 results/<RESULT_NAME>/
 DEVICE = "cuda"  # "cpu" 或 "cuda"
 CUDA_DEVICE_IDS = (0,1)  # 双卡示例 (0, 1)，按 MODELS 顺序轮流分配，每个模型仅用一张卡
 
@@ -19,3 +15,13 @@ ITR_GAZE_SECONDS = 0.5  # ITR 选择时间等于窗长加此时长
 
 GPU_WARMUP_BATCHES = 3
 GPU_PROBE_BATCHES = 5
+
+
+def experiment_datasets(base_dir):
+    ids = (PREPROCESS_IDS,) if isinstance(PREPROCESS_IDS, int) else tuple(PREPROCESS_IDS)
+    if (not ids or any(type(i) is not int or i not in OUTPUT_FILES for i in ids)
+            or len(set(ids)) != len(ids)):
+        raise ValueError("PREPROCESS_IDS 须选 1、2 或两者，且不能重复")
+    for method in ids:
+        directory = base_dir if method == 1 else base_dir / "preprocess_2"
+        yield method, OUTPUT_FILES[method], directory

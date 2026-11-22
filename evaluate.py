@@ -12,7 +12,7 @@ from configs import config
 from data_preprocess import config as data_config
 from data_preprocess.preprocess import window_samples
 from train import (
-    atomic_write, check_archive, configure_runtime, fold_directory, input_shapes, loso_splits, model_module,
+    archive_method, atomic_write, check_archive, configure_runtime, fold_directory, input_shapes, loso_splits, model_module,
     experiment_args, model_config, model_devices, parallel_model, prediction_logits, prepare_inputs, read_archive, runtime_details, save_text,
     subject_loader, training_settings,
 )
@@ -206,7 +206,7 @@ def write_comparison(run_dir, all_results):
     save_text(run_dir / "report.md", "\n".join(lines) + "\n")
 
 
-def evaluate_experiment(data_file, run_dir, legacy_run=None, legacy_data_file=None):
+def evaluate_experiment(data_file, run_dir, legacy_run=None, legacy_data_file=None, preprocess_id=None):
     _, available_ids = configure_runtime()
     artifacts = run_dir / "artifacts"
     artifacts.mkdir(parents=True, exist_ok=True)
@@ -214,10 +214,11 @@ def evaluate_experiment(data_file, run_dir, legacy_run=None, legacy_data_file=No
     with FileLock(artifacts / "run.lock", timeout=0), data_file.open("rb") as source:
         archive, digest = read_archive(source)
         with archive:
+            method = archive_method(archive, preprocess_id)
             results = []
             if path.exists():
                 plan = json.loads(path.read_text(encoding="utf-8"))
-                if digest != plan["data_sha256"]:
+                if digest != plan["data_sha256"] or plan.get("preprocess_id", 1) != method:
                     raise ValueError("预处理数据的指纹与训练记录不符，请使用训练时的文件")
                 assignments = model_devices(plan["model_order"], available_ids)
                 for name in plan["model_order"]:
@@ -251,5 +252,6 @@ def evaluate_experiment(data_file, run_dir, legacy_run=None, legacy_data_file=No
 if __name__ == "__main__":
     _, directory = experiment_args()
     eeg_config = model_config("eeg-deformer")
-    evaluate_experiment(data_config.OUTPUT_FILE, directory, eeg_config.LEGACY_EEG_RUN_DIR,
-                        eeg_config.LEGACY_EEG_DATA_FILE)
+    for method, data_file, run_dir in config.experiment_datasets(directory):
+        evaluate_experiment(data_file, run_dir, eeg_config.LEGACY_EEG_RUN_DIR,
+                            eeg_config.LEGACY_EEG_DATA_FILE, method)

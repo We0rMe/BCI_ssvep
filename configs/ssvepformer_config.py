@@ -3,8 +3,8 @@ BATCH_SIZE = 128
 LEARNING_RATE = 1e-3
 EPOCHS = 100
 OPTIMIZER = "sgd"  # adam 或 sgd
-SCHEDULER = "cosine"  # cosine 或 constant
-WEIGHT_DECAY = 1e-5
+SCHEDULER = "constant"
+WEIGHT_DECAY = 1e-3  # SGD 通过 weight_decay 实现论文的 L2 惩罚
 SGD_MOMENTUM = 0.9
 
 

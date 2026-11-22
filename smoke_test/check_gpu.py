@@ -10,7 +10,7 @@ from configs import config
 from data_preprocess import config as data_config
 from data_preprocess.preprocess import window_samples
 from train import (
-    batch_step, check_archive, configure_runtime, input_shapes, loso_splits, make_optimizer, experiment_args, model_devices,
+    archive_method, batch_step, check_archive, configure_runtime, input_shapes, loso_splits, make_optimizer, experiment_args, model_devices,
     model_module, parallel_model, prepare_inputs, runtime_details, model_config, set_seed, subject_loader, training_settings,
 )
 
@@ -87,15 +87,15 @@ def probe(module, options, inputs, labels, subject_ids, split, device, cuda_ids,
     }
 
 
-def main():
-    names, _ = experiment_args()
+def probe_dataset(names, method, data_file, directory):
     if config.DEVICE != "cuda" or config.GPU_WARMUP_BATCHES < 0 or config.GPU_PROBE_BATCHES < 1:
         raise ValueError("GPU 预热须设置 CUDA，且至少有一个计时 batch")
     _, cuda_ids = configure_runtime()
     assignments = model_devices(names, cuda_ids)
     counts = window_samples(data_config.WINDOW_SECONDS)
-    report = {"models": {}}
-    with np.load(data_config.OUTPUT_FILE, allow_pickle=False) as archive:
+    report = {"preprocess_id": method, "models": {}}
+    with np.load(data_file, allow_pickle=False) as archive:
+        archive_method(archive, method)
         check_archive(archive, counts)
         subject_ids, labels = archive["subject_ids"], archive["labels"]
         split = loso_splits(subject_ids, 1)[0]
@@ -114,10 +114,16 @@ def main():
                                                        split, device, assigned, settings)
                 del inputs
             report["models"][name] = results
-    output = data_config.PROJECT_DIR / "smoke_test" / "output" / "gpu_report.json"
+    output = directory / "gpu_report.json"
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(f"GPU 检查已保存到 {output}")
+
+
+def main():
+    names, _ = experiment_args()
+    for method, data_file, directory in config.experiment_datasets(data_config.PROJECT_DIR / "smoke_test" / "output"):
+        probe_dataset(names, method, data_file, directory)
 
 
 if __name__ == "__main__":

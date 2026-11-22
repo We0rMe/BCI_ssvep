@@ -55,7 +55,9 @@ def save_archive(output_file, arrays):
         temporary.unlink(missing_ok=True)
 
 
-def prepare_benchmark(data_dir, output_file, subject_ids, windows):
+def prepare_benchmark(data_dir, output_file, subject_ids, windows, method=1):
+    if method not in config.OUTPUT_FILES:
+        raise ValueError(f"未知预处理编号 {method}")
     counts = window_samples(windows)
     start = start_sample()
     channels = channel_indices(data_dir / "64-channels.loc")
@@ -88,15 +90,25 @@ def prepare_benchmark(data_dir, output_file, subject_ids, windows):
         arrays[f"raw_{count}"] = np.empty(shape, dtype=np.float64)
         arrays[f"eeg_{count}"] = np.empty(shape, dtype=np.float32)
 
+    if method == 2:
+        arrays["preprocess_id"] = method
     for index, subject_id in enumerate(subject_ids):
         source = data_dir / f"S{subject_id}.mat"
         raw = loadmat(source, variable_names=("data",))["data"]
         if raw.shape != expected:
             raise ValueError(f"{source.name} 的形状为 {raw.shape}，预期为 {expected}")
+        if method == 2:
+            full_trials = crop_trials(raw, channels, 0, config.TRIAL_SAMPLES)
+            # FB 的子带取决于模型配置，保留原始试次供其逐被试滤波。
+            arrays[f"raw_trials_s{subject_id}"] = full_trials
+            filtered = sosfiltfilt(sos, full_trials, axis=-1)
         for count in counts:
             trials_in_window = crop_trials(raw, channels, start, count)
             arrays[f"raw_{count}"][index] = trials_in_window
-            arrays[f"eeg_{count}"][index] = sosfiltfilt(sos, trials_in_window, axis=-1)
+            if method == 1:
+                arrays[f"eeg_{count}"][index] = sosfiltfilt(sos, trials_in_window, axis=-1)
+            else:
+                arrays[f"eeg_{count}"][index] = filtered[..., start : start + count]
         print(f"[{index + 1}/{len(subject_ids)}] 已处理 S{subject_id}", flush=True)
 
     save_archive(output_file, arrays)
@@ -104,8 +116,9 @@ def prepare_benchmark(data_dir, output_file, subject_ids, windows):
 
 
 def main():
-    prepare_benchmark(config.BENCHMARK_DIR, config.OUTPUT_FILE,
-                      range(1, config.NUM_SUBJECTS + 1), config.WINDOW_SECONDS)
+    for method, path in config.OUTPUT_FILES.items():
+        prepare_benchmark(config.BENCHMARK_DIR, path, range(1, config.NUM_SUBJECTS + 1),
+                          config.WINDOW_SECONDS, method)
 
 
 if __name__ == "__main__":

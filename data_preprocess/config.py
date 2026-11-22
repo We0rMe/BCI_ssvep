@@ -6,6 +6,7 @@ PROJECT_DIR = Path(__file__).resolve().parents[1]
 # 常用设置
 BENCHMARK_DIR = PROJECT_DIR / "data" / "benchmark"  # 原始 MAT 文件目录
 OUTPUT_FILE = PROJECT_DIR / "data_preprocess" / "benchmark.npz"  # 共用预处理文件
+OUTPUT_FILES = {1: OUTPUT_FILE, 2: OUTPUT_FILE.with_name("benchmark_full_trial.npz")}
 WINDOW_SECONDS = (0.5, 1.0)  # 同时准备的分类窗长，单位为秒
 
 # Benchmark 原始数据属性

@@ -28,10 +28,18 @@ def prepare_inputs(archive, count, settings):
         settings["passband_ripple_db"], settings["stopband_attenuation_db"],
     )
 
-    def make_features(trials):
-        features = [window_features(band, fs, settings) for band in filter_bands(trials, filters)]
+    def make_features(trials, start=0):
+        features = [window_features(band[..., start : start + count], fs, settings)
+                    for band in filter_bands(trials, filters)]
         return np.stack(features, axis=1)
 
+    if archive.get("preprocess_id", 1) == 2:
+        start = int(archive["window_start_sample"])
+
+        def subject_features(subject):
+            return make_features(archive[f"raw_trials_s{subject}"], start)
+
+        return (transform_subjects(archive["subject_ids"], subject_features),)
     return (transform_subjects(archive[f"raw_{count}"], make_features),)
 
 
