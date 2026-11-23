@@ -1,9 +1,9 @@
 from data_preprocess.config import NUM_SUBJECTS, OUTPUT_FILES
 
 # 可选模型：mtsnet、ssvepformer、fb-ssvepformer、ssvepformer_eKAN、
-MODELS = ("ssvepGPT_Linear",)
-PREPROCESS_IDS = (1,)  # (1,) 先截窗；(2,) 整试次先滤波；(1, 2) 依次独立运行
-RESULT_NAME = "ssvepgpt_linear"  # 本次实验的结果目录名，训练和评估均使用 results/<RESULT_NAME>/
+MODELS = ("mtsnet",)
+PREPROCESS_IDS = (1,)  # (1,) 先截窗；(2,) 先滤波；(1, 2) 依次独立运行
+RESULT_NAME = "mtsnet_constant"  # 本次实验的结果目录名，训练和评估均使用 results/<RESULT_NAME>/
 DEVICE = "cuda"  # "cpu" 或 "cuda"
 CUDA_DEVICE_IDS = (0,)  # 双卡示例 (0, 1)，按 MODELS 顺序轮流分配，每个模型仅用一张卡
 

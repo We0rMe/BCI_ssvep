@@ -1,13 +1,24 @@
 """MTSNet 时域、频域编码器与多尺度融合，结构依据 lanzhen19/MTSNet。"""
 
+import numpy as np
 import torch
 from torch import nn
 
 from data_preprocess.features import transform_subjects, window_features
 
 
+def standardize_trials(trials):
+    # 每个试次的全部通道和采样点共用一组均值和标准差。
+    axes = (-2, -1)
+    mean = trials.mean(axis=axes, keepdims=True, dtype=np.float64)
+    std = trials.std(axis=axes, keepdims=True, dtype=np.float64)
+    return ((trials - mean) / np.where(std > 0, std, 1.0)).astype(np.float32)
+
+
 def prepare_inputs(archive, count, settings):
     eeg = archive[f"eeg_{count}"]
+    if settings.get("standardize_trials", False):
+        eeg = transform_subjects(eeg, standardize_trials)
     fs = archive["sampling_rate_hz"].item()
     spectrum = transform_subjects(eeg, lambda trials: window_features(trials, fs, settings))
     return eeg, spectrum

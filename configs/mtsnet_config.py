@@ -3,12 +3,13 @@ BATCH_SIZE = 64
 LEARNING_RATE = 1e-3
 EPOCHS = 100
 OPTIMIZER = "sgd"  # adam 或 sgd
-SCHEDULER = "cosine"  # cosine 或 constant
+SCHEDULER = "constant"  # 补充实验：SGD 全程使用固定学习率
 WEIGHT_DECAY = 1e-4
 SGD_MOMENTUM = 0.9
 
 
 SETTINGS = {
+    "standardize_trials": True,  # 先对每个滤波后的 EEG 窗做 z-score，再计算 FFT
     # 同一滤波试次的复频谱，先实部、后虚部。
     "input_type": "complex",
     "fft_resolution": 0.2,

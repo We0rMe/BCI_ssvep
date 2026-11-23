@@ -42,7 +42,10 @@ def check_mtsnet(data_file):
     with np.load(data_file, allow_pickle=False) as archive:
         for count in (125, 250):
             eeg, spectrum = train.prepare_inputs(module, archive, count, settings)
-            np.testing.assert_array_equal(eeg, archive[f"eeg_{count}"])
+            original = archive[f"eeg_{count}"].astype(np.float64)
+            axes = (-2, -1)
+            expected = (original - original.mean(axis=axes, keepdims=True)) / original.std(axis=axes, keepdims=True)
+            np.testing.assert_allclose(eeg, expected, rtol=1e-6, atol=1e-7)
             assert spectrum.shape == (*eeg.shape[:-1], 560)
             reference = np.fft.rfft(eeg[1, 0], n=1250)[:, 40:320] * (2 / count)
             np.testing.assert_allclose(spectrum[1, 0], np.concatenate((reference.real, reference.imag), axis=-1),
