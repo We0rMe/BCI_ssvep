@@ -1,5 +1,6 @@
 """SsvepGPT：借鉴 SleepGPT 的统一时频编码，监督学习单试次 SSVEP 类别。"""
 
+import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -7,8 +8,16 @@ from torch.nn import functional as F
 from data_preprocess.features import transform_subjects, window_features
 
 
+def normalize_trial_rms(trials):
+    # 每个试次的全部电极和采样点共用一个尺度。
+    rms = np.sqrt(np.square(trials, dtype=np.float64).mean(axis=(-2, -1), keepdims=True))
+    return (trials / np.maximum(rms, 1e-12)).astype(np.float32)
+
+
 def prepare_inputs(archive, count, settings):
     eeg = archive[f"eeg_{count}"]
+    if settings.get("normalize_trial_rms", False):
+        eeg = transform_subjects(eeg, normalize_trial_rms)
     fs = archive["sampling_rate_hz"].item()
     spectrum = transform_subjects(eeg, lambda trials: window_features(trials, fs, settings))
     return eeg, spectrum

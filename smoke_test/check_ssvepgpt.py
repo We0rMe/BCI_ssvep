@@ -13,11 +13,39 @@ from data_preprocess import config as data_config
 from smoke_test.check_pipeline import make_small_data
 
 
+def check_rms(module, archive, count, model):
+    key = f"eeg_{count}"
+    original = archive[key][0, :1]
+    waves = np.stack([original, original * 0.5, original * 2, np.zeros_like(original)], axis=1)
+    sample = {key: waves, "sampling_rate_hz": archive["sampling_rate_hz"]}
+    options = dict(SETTINGS, normalize_trial_rms=True)
+    eeg, spectrum = module.prepare_inputs(sample, count, options)
+    for values in (eeg, spectrum):
+        np.testing.assert_allclose(values[:, 1], values[:, 0], rtol=1e-6, atol=1e-7)
+        np.testing.assert_allclose(values[:, 2], values[:, 0], rtol=1e-6, atol=1e-7)
+        np.testing.assert_array_equal(values[:, 3], 0)
+    model.eval()
+    with torch.no_grad():
+        logits = model(torch.from_numpy(eeg[0]), torch.from_numpy(spectrum[0]))
+        torch.testing.assert_close(logits[1:3], logits[:1].expand(2, -1))
+
+    # 旧运行清单没有 RMS 开关，应保留原始幅值。
+    del options["normalize_trial_rms"]
+    legacy, _ = module.prepare_inputs(sample, count, options)
+    np.testing.assert_array_equal(legacy[:, 0], original)
+    np.testing.assert_array_equal(legacy[:, 2], original * 2)
+
+
 def check_window(archive, count):
     module = train.model_module("ssvepgpt")
     inputs = train.prepare_inputs(module, archive, count, SETTINGS)
     eeg, spectrum = inputs
-    np.testing.assert_array_equal(eeg, archive[f"eeg_{count}"])
+    raw = archive[f"eeg_{count}"].astype(np.float64)
+    if SETTINGS.get("normalize_trial_rms", False):
+        rms = np.sqrt(np.mean(raw ** 2, axis=(-2, -1), keepdims=True))
+        np.testing.assert_allclose(eeg, raw / np.maximum(rms, 1e-12), rtol=1e-6)
+    else:
+        np.testing.assert_array_equal(eeg, raw)
     expected = np.fft.rfft(eeg, n=1250, axis=-1)[..., 40:321] / count
     np.testing.assert_allclose(spectrum, np.concatenate((expected.real, expected.imag), axis=-1),
                                rtol=1e-5, atol=1e-6)
@@ -59,6 +87,7 @@ def check_window(archive, count):
     assert outputs[0].shape[1] == time_count + eeg.shape[2] * model.spectrum_bands
     assert not torch.allclose(outputs[0][:, time_count:], outputs[1][:, time_count:])
     assert not torch.allclose(outputs[0][:, :time_count], outputs[2][:, :time_count])
+    check_rms(module, archive, count, model)
     return sum(p.numel() for p in model.parameters())
 
 
@@ -74,7 +103,7 @@ def main():
         with np.load(data_file) as archive:
             for count in (125, 250):
                 parameters = check_window(archive, count)
-                summary.append(f"{count} 点：{parameters:,} 个参数，频带 token、双向跨域交互及梯度检查通过。")
+                summary.append(f"{count} 点：{parameters:,} 个参数，逐试次 RMS、幅值缩放、频带 token、跨域交互及梯度检查通过。")
         with (patch.object(data_config, "NUM_SUBJECTS", 3),
               patch.multiple(config, DEVICE="cpu", LOSO_FOLDS=1),
               patch.multiple(ssvepgpt_config, BATCH_SIZE=4, EPOCHS=1)):

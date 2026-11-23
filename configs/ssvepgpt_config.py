@@ -9,6 +9,7 @@ SGD_MOMENTUM = 0.9
 
 
 SETTINGS = {
+    "normalize_trial_rms": True,  # 先逐试次统一幅值，再从同一波形计算复频谱
     "input_type": "complex",  # 每个电极的整窗频谱，先实部、后虚部
     "fft_resolution": 0.2,
     "spectrum_hz": (8.0, 64.0),
