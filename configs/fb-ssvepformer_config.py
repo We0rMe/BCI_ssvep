@@ -1,13 +1,13 @@
-from .ssvepformer_config import SETTINGS as SUBNETWORK_SETTINGS
+from .ssvepformer_config import SUBNETWORK_SETTINGS
 
 
 # 本模型的训练超参数
-BATCH_SIZE = 64
+BATCH_SIZE = 128
 LEARNING_RATE = 1e-3
 # 各阶段轮数见下方 pretrain_epochs 和 joint_epochs
-OPTIMIZER = "adam"  # adam 或 sgd
-SCHEDULER = "cosine"  # cosine 或 constant
-WEIGHT_DECAY = 1e-5
+OPTIMIZER = "sgd"  # adam 或 sgd
+SCHEDULER = "constant"  # cosine 或 constant
+WEIGHT_DECAY = 1e-3
 SGD_MOMENTUM = 0.9
 
 

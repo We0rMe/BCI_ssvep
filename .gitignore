@@ -5,3 +5,5 @@ __pycache__/
 /data_preprocess/*.npz
 /results/
 /smoke_test/output/
+统计.xlsx
+~$统计.xlsx

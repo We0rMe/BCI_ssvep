@@ -36,6 +36,24 @@ def make_small_data(path):
     save_archive(path, values)
 
 
+def check_ssvepformer_norms():
+    # 各通道的尺度不同，可区分逐通道频谱归一化、跨通道归一化和全局归一化。
+    x = torch.randn(2, 18, 562) * torch.arange(1, 19).view(1, 18, 1)
+    centered = x - x.mean(dim=-1, keepdim=True)
+    variance = centered.square().mean(dim=-1, keepdim=True)
+    for name in ("ssvepformer", "fb-ssvepformer", "ssvepformer_eKAN"):
+        shapes = [(3, 9, 562)] if name == "fb-ssvepformer" else [(9, 562)]
+        model = train.model_module(name).build_model(shapes, 40, train.model_config(name).SETTINGS)
+        backbones = model.subnetworks if name == "fb-ssvepformer" else [model]
+        for backbone in backbones:
+            norms = [backbone.channel_combination[1]]
+            for block in backbone.encoder:
+                norms.extend([block.cnn[0], block.cnn[2], block.mlp[0]])
+            for norm in norms:
+                torch.testing.assert_close(norm(x), centered / (variance + norm.eps).sqrt())
+            assert backbone.classifier[3].normalized_shape == (240,)
+
+
 def check_mtsnet(data_file):
     module = train.model_module("mtsnet")
     settings = import_module("configs.mtsnet_config").SETTINGS
@@ -160,6 +178,7 @@ def main():
     output = data_config.PROJECT_DIR / "smoke_test" / "output"
     output.mkdir(parents=True, exist_ok=True)
     torch.set_num_threads(1)
+    check_ssvepformer_norms()
     fb = import_module("configs.fb-ssvepformer_config")
     with TemporaryDirectory(dir=output) as directory:
         root = Path(directory)

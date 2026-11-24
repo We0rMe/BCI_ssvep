@@ -7,18 +7,32 @@ from torch import nn
 from data_preprocess.features import transform_subjects, window_features
 
 
+class ChannelLayerNorm(nn.LayerNorm):
+    """输入为 [batch, channels, features]，在每个频谱位置沿通道归一化。"""
+
+    def forward(self, x):
+        return super().forward(x.transpose(1, 2)).transpose(1, 2)
+
+
+def backbone_norm(channels, features, cfg):
+    # 历史运行清单没有此字段，恢复权重时沿用其频谱轴 LayerNorm。
+    if getattr(cfg, "channel_layer_norm", False):
+        return ChannelLayerNorm(channels)
+    return nn.LayerNorm(features)
+
+
 class Encoder(nn.Module):
     def __init__(self, channels, features, cfg):
         super().__init__()
         self.cnn = nn.Sequential(
-            nn.LayerNorm(features),
+            backbone_norm(channels, features, cfg),
             nn.Conv1d(channels, channels, cfg.kernel_size, padding=cfg.kernel_size // 2),
-            nn.LayerNorm(features),
+            backbone_norm(channels, features, cfg),
             nn.GELU(),
             nn.Dropout(cfg.dropout),
         )
         self.mlp = nn.Sequential(
-            nn.LayerNorm(features), nn.Linear(features, features), nn.GELU(), nn.Dropout(cfg.dropout),
+            backbone_norm(channels, features, cfg), nn.Linear(features, features), nn.GELU(), nn.Dropout(cfg.dropout),
         )
 
     def forward(self, x):
@@ -33,7 +47,8 @@ class SSVEPformer(nn.Module):
         features = cfg.features
         hidden = cfg.head_multiplier * cfg.classes
         self.channel_combination = nn.Sequential(
-            nn.Conv1d(cfg.input_channels, channels, 1), nn.LayerNorm(features), nn.GELU(), nn.Dropout(cfg.dropout),
+            nn.Conv1d(cfg.input_channels, channels, 1), backbone_norm(channels, features, cfg),
+            nn.GELU(), nn.Dropout(cfg.dropout),
         )
         self.encoder = nn.Sequential(*(Encoder(channels, features, cfg) for _ in range(cfg.encoder_blocks)))
         self.classifier = nn.Sequential(

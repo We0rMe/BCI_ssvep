@@ -1,11 +1,11 @@
 from data_preprocess.config import NUM_SUBJECTS, OUTPUT_FILES
 
 # 可选模型：mtsnet、ssvepformer、fb-ssvepformer、ssvepformer_eKAN、
-MODELS = ("mtsnet",)
+MODELS = ("ssvepformer","ssvepformer_eKAN","fb-ssvepformer")
 PREPROCESS_IDS = (1,)  # (1,) 先截窗；(2,) 先滤波；(1, 2) 依次独立运行
-RESULT_NAME = "mtsnet_constant"  # 本次实验的结果目录名，训练和评估均使用 results/<RESULT_NAME>/
+RESULT_NAME = "ssvepformer_series_spectralnorm"  # 本次实验的结果目录名，训练和评估均使用 results/<RESULT_NAME>/
 DEVICE = "cuda"  # "cpu" 或 "cuda"
-CUDA_DEVICE_IDS = (0,)  # 双卡示例 (0, 1)，按 MODELS 顺序轮流分配，每个模型仅用一张卡
+CUDA_DEVICE_IDS = (0,1)  # 双卡示例 (0, 1)，按 MODELS 顺序轮流分配，每个模型仅用一张卡
 
 SEED = 42
 LOSO_FOLDS = NUM_SUBJECTS  # 前 N 折，每折用全部非测试被试训练

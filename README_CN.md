@@ -56,6 +56,8 @@ EEG-Deformer 的输入在 `configs/eeg-deformer_config.py` 中选择。`INPUT_TY
 
 普通 SSVEPformer 使用固定学习率 0.001、SGD 动量 0.9、L2 系数 0.001、batch 128 和 100 轮训练。L2 惩罚由 SGD 的 `weight_decay` 实现。重训时请使用新的实验目录，以保留采用原训练配方的结果。
 
+普通 SSVEPformer、FB 的各个子网及 eKAN 共用 `configs/ssvepformer_config.py` 中的主干配置。对默认复频谱输入，通道组合层和编码器在每个空间通道内，沿实部与虚部拼接而成的 562 维特征轴做 LayerNorm。分类头沿 240 个隐藏特征做 LayerNorm。卷积和线性层权重采用均值 0、标准差 0.01 的正态初始化，沿用编号 1 上验证过的基线。该标准差对应方差 0.0001，与作者公开稿写出的方差 0.01 有别。FB 的融合卷积和 eKAN 输出层的基础线性权重、样条系数也使用基线标准差。评估历史运行时按其清单选择归一化轴。[原文第 2.4、2.6 节](https://arxiv.org/pdf/2210.04172)
+
 模型选择（`MODELS`）、设备、随机种子、LOSO 折数、确定性与 TF32 开关、ITR 附加时长和 GPU 预热与计时批数都在 `configs/config.py` 中设置。
 
 每个模型的结构和训练超参数在 `configs/<模型名>_config.py`。可分别调整 batch、优化器（Adam 或 SGD）、动量、权重衰减、学习率、调度器（余弦退火或固定学习率）和训练轮数。FB 复用 SSVEPformer 的子网结构参数，在自己的配置文件中设置训练参数、各子网预训练轮数和联合训练轮数。联合训练从各子网末轮权重开始。SpikeTFNet 的辅助损失权重在其自身配置文件设置。
