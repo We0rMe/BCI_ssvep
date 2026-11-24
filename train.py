@@ -144,9 +144,10 @@ def parallel_model(module, model, cuda_ids):
 
 def make_optimizer(model, settings):
     options = {"lr": settings["LEARNING_RATE"], "weight_decay": settings["WEIGHT_DECAY"]}
+    parameters = model.optimizer_groups() if hasattr(model, "optimizer_groups") else model.parameters()
     if settings["OPTIMIZER"] == "sgd":
-        return SGD(model.parameters(), momentum=settings["SGD_MOMENTUM"], **options)
-    return Adam(model.parameters(), **options)
+        return SGD(parameters, momentum=settings["SGD_MOMENTUM"], **options)
+    return Adam(parameters, **options)
 
 
 def training_plan(module, options, epochs):

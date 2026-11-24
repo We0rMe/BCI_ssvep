@@ -1,9 +1,8 @@
 from data_preprocess.config import NUM_SUBJECTS, OUTPUT_FILES
 
-# 可选模型：mtsnet、ssvepformer、fb-ssvepformer、ssvepformer_eKAN、
-MODELS = ("ssvepformer","ssvepformer_eKAN","fb-ssvepformer")
+MODELS = ("ssvepformer", "ssvepformer_eKAN", "fb-ssvepformer", "awknet")
 PREPROCESS_IDS = (1,)  # (1,) 先截窗；(2,) 先滤波；(1, 2) 依次独立运行
-RESULT_NAME = "ssvepformer_series_spectralnorm"  # 本次实验的结果目录名，训练和评估均使用 results/<RESULT_NAME>/
+RESULT_NAME = "awknet_ssvep_v1"  # 训练和评估均使用 results/<RESULT_NAME>/
 DEVICE = "cuda"  # "cpu" 或 "cuda"
 CUDA_DEVICE_IDS = (0,1)  # 双卡示例 (0, 1)，按 MODELS 顺序轮流分配，每个模型仅用一张卡
 

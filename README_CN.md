@@ -34,6 +34,7 @@ python evaluate.py
 | --- | --- |
 | `ssvepformer` | `[9, 562]`，复频谱实部与虚部沿频率轴拼接 |
 | `ssvepformer_eKAN` | `[9, 562]`，使用 eKAN 分类头 |
+| `awknet` | `[9, 125]` 或 `[9, 250]`，三级可学习时间小波、时空卷积和 KAN 分类头 |
 | `fb-ssvepformer` | `[3, 9, 562]`，三个子带各自做复频谱变换 |
 | `spiketfnet` | `[9, 采样点]` 和 `[9, 560]`，时域与复频谱双输入 |
 | `eeg-deformer` | `[9, 采样点]`，默认 3 个 HCT 块 |
@@ -70,6 +71,24 @@ python evaluate.py --run-dir results/comparison
 ```
 
 配置 `DEVICE = "cpu"` 使用 CPU，`DEVICE = "cuda"` 时通过 `CUDA_DEVICE_IDS` 选择一张或两张显卡。例如 `CUDA_DEVICE_IDS = (0, 1)` 时，第 1、3 个模型在卡 0 上依次训练，第 2、4 个模型在卡 1 上依次训练，两张卡各用一个进程并行工作。只选一个模型时使用第一张卡。GPU 预热使用相同的模型选择与设备分配规则。
+
+### AWKNet 的训练和预检
+
+AWKNet 直接读取共用的滤波波形。每折从 db4 初始化，用训练被试的分类误差联合更新小波、卷积和 KAN。损失另含低通核能量、直流增益及偶数位移正交约束。A3 和 D3 在同一尺度拼接，D2 独立卷积，两路均保留时间顺序，再拼接特征进行分类。所有电极共享一组小波，评估留出被试时使用该折末轮权重。[原论文](https://doi.org/10.1109/TCE.2025.3540970) · [作者的 MI 实现](https://github.com/Songyu-EEGsignals/AdaptiveWavelets/blob/c73583db8ca17ca32af1ca7bedade33660c50c23/TrainAWDModel3KAN.py)
+
+`configs/awknet_config.py` 默认使用 batch 64、Adam 和 100 轮余弦退火。小波初始学习率为 `1e-4`，权重衰减为零。其余参数使用 `1e-3` 和 `1e-5` 权重衰减。日志记录主干学习率，断点保存两组优化器状态。设置 `use_d2=False` 可对照仅保留 A3、D3 的版本，切换时请使用新实验目录。
+
+本地 CPU 冒烟命令为 `python -m smoke_test.check_awknet`，结果保存在 `smoke_test/output/awknet/cpu.txt`。服务器准备好共用 NPZ 后，先在项目根目录执行 GPU 预检。单独测 AWKNet 时使用以下命令。多模型实验请把预检的模型列表和顺序设为与正式训练一致，使每个模型在相同的卡上预热。
+
+```text
+python -m smoke_test.check_gpu --models awknet
+```
+
+预检在首折训练被试上对每个窗长执行 3 个预热 batch、5 个计时 batch 和 1 个算子采样 batch，包括联合损失、反向传播及优化器更新。将 `smoke_test/output/gpu_report.json` 发回核对后再启动正式训练。重点核对以下信息。
+
+- 输入为 FP32 时域数据，两个窗长分别为 `[64, 9, 125]` 和 `[64, 9, 250]`，输出为目标卡上的 FP32 `[64, 40]`。`loss_and_gradients_finite` 应为真。
+- 核对实际 GPU 型号和卡号，以及 PyTorch、CUDA、cuDNN 版本。默认开启确定性算法与 cuDNN 确定性，关闭 cuDNN benchmark 与 TF32。核对 cuBLAS workspace 和 FP32 精度设置。
+- 比较两个窗长的 batch 耗时中位数与峰值显存。结合 `observed_operators`、`cuda_activity_enabled` 和 `cuda_kernel_examples` 确认卷积及矩阵乘法实际后端。
 
 ### SsvepGPT 正式训练前的核对
 
