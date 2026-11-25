@@ -1,10 +1,10 @@
 from data_preprocess.config import NUM_SUBJECTS, OUTPUT_FILES
 
-MODELS = ("ssvepformer", "ssvepformer_eKAN", "fb-ssvepformer", "awknet")
+MODELS = ("fb-ssvepformer",)
 PREPROCESS_IDS = (1,)  # (1,) 先截窗；(2,) 先滤波；(1, 2) 依次独立运行
-RESULT_NAME = "awknet_ssvep_v1"  # 训练和评估均使用 results/<RESULT_NAME>/
+RESULT_NAME = "fb-ssvepformer"  # 训练和评估均使用 results/<RESULT_NAME>/
 DEVICE = "cuda"  # "cpu" 或 "cuda"
-CUDA_DEVICE_IDS = (0,1)  # 双卡示例 (0, 1)，按 MODELS 顺序轮流分配，每个模型仅用一张卡
+CUDA_DEVICE_IDS = (0,)  # 双卡示例 (0, 1)，按 MODELS 顺序轮流分配，每个模型仅用一张卡
 
 SEED = 42
 LOSO_FOLDS = NUM_SUBJECTS  # 前 N 折，每折用全部非测试被试训练

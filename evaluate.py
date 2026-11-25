@@ -203,6 +203,14 @@ def write_comparison(run_dir, all_results):
     for name, plan, rows, differences in different:
         lines.extend(("", "## 旧实验", "", "口径差异为" + "、".join(differences) + "。", "", *header))
         lines.extend(summary_rows(name, plan, rows))
+    if any(rows for _, _, rows, _ in all_results):
+        lines.extend(("", "## 逐被试评估结果", "",
+                      "| 模型 | 窗长（采样点） | 被试 | ACC（%） | ITR（bits/min） |",
+                      "| --- | ---: | --- | ---: | ---: |"))
+        for name, _, rows, _ in all_results:
+            for row in rows:
+                lines.append(f"| {name} | {row['samples']} | S{row['subject_id']:02d} | "
+                             f"{row['acc_percent']:.2f} | {row['itr_bits_min']:.2f} |")
     save_text(run_dir / "report.md", "\n".join(lines) + "\n")
 
 
