@@ -16,8 +16,8 @@ from filelock import FileLock
 from matplotlib.figure import Figure
 from torch import nn
 from torch.nn.functional import cross_entropy
-from torch.optim import Adam, SGD
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim import Adam, AdamW, SGD
+from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR
 from torch.utils.data import DataLoader, TensorDataset
 
 from configs import config
@@ -41,6 +41,10 @@ def training_settings(model_cfg):
     }
     if hasattr(model_cfg, "EPOCHS"):
         settings["EPOCHS"] = model_cfg.EPOCHS
+    if model_cfg.OPTIMIZER == "adamw":
+        settings.update(ADAM_BETAS=model_cfg.ADAM_BETAS, ADAM_EPS=model_cfg.ADAM_EPS)
+    if model_cfg.SCHEDULER == "warmup_cosine":
+        settings["WARMUP_EPOCHS"] = model_cfg.WARMUP_EPOCHS
     return settings
 
 
@@ -147,7 +151,27 @@ def make_optimizer(model, settings):
     parameters = model.optimizer_groups() if hasattr(model, "optimizer_groups") else model.parameters()
     if settings["OPTIMIZER"] == "sgd":
         return SGD(parameters, momentum=settings["SGD_MOMENTUM"], **options)
+    if settings["OPTIMIZER"] == "adamw":
+        return AdamW(parameters, betas=settings["ADAM_BETAS"], eps=settings["ADAM_EPS"], **options)
     return Adam(parameters, **options)
+
+
+def make_scheduler(optimizer, settings, epochs):
+    if settings["SCHEDULER"] == "cosine":
+        return CosineAnnealingLR(optimizer, T_max=epochs)
+    if settings["SCHEDULER"] == "warmup_cosine":
+        warmup = settings["WARMUP_EPOCHS"]
+        if not 1 <= warmup < epochs:
+            raise ValueError("预热轮数须至少为 1 且小于总轮数")
+
+        def lr_factor(index):
+            if index < warmup:
+                return (index + 1) / warmup
+            progress = (index + 1 - warmup) / (epochs + 1 - warmup)
+            return (1 + math.cos(math.pi * progress)) / 2
+
+        return LambdaLR(optimizer, lr_factor)
+    return None
 
 
 def training_plan(module, options, epochs):
@@ -249,7 +273,7 @@ def train_fold(module, options, plan, settings, inputs, labels, subject_ids, spl
         active = model if band is None else model.subnetworks[band]
         network = parallel_model(module, active, cuda_ids)
         optimizer = make_optimizer(active, settings)
-        scheduler = CosineAnnealingLR(optimizer, T_max=epochs) if settings["SCHEDULER"] == "cosine" else None
+        scheduler = make_scheduler(optimizer, settings, epochs)
         done = 0
         if state is not None and stage_index == state["stage_index"]:
             optimizer.load_state_dict(state["optimizer"])
@@ -370,7 +394,7 @@ def train_experiment(data_file, run_dir, names=None, preprocess_id=None):
     recipes = {name: training_settings(cfg) for name, cfg in configs.items()}
     plans = {name: training_plan(modules[name], model_options[name], recipes[name].get("EPOCHS")) for name in names}
     for name, recipe in recipes.items():
-        if recipe["OPTIMIZER"] not in ("adam", "sgd") or recipe["SCHEDULER"] not in ("cosine", "constant"):
+        if recipe["OPTIMIZER"] not in ("adam", "adamw", "sgd") or recipe["SCHEDULER"] not in ("cosine", "constant", "warmup_cosine"):
             raise ValueError(f"{name} 的优化器或学习率调度器无效")
         if not plans[name] or any(not isinstance(n, int) or n < 1 for _, n, _ in plans[name]):
             raise ValueError(f"{name} 训练阶段的轮数须为正整数")

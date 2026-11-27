@@ -11,7 +11,7 @@ from data_preprocess import config as data_config
 from data_preprocess.preprocess import window_samples
 from train import (
     archive_method, batch_step, check_archive, configure_runtime, input_shapes, loso_splits, make_optimizer, experiment_args, model_devices,
-    model_module, parallel_model, prepare_inputs, runtime_details, model_config, set_seed, subject_loader, training_settings,
+    make_scheduler, model_module, parallel_model, prepare_inputs, runtime_details, model_config, set_seed, subject_loader, training_settings,
 )
 
 
@@ -27,6 +27,8 @@ def probe(module, options, inputs, labels, subject_ids, split, device, cuda_ids,
     model = module.build_model(shapes, data_config.NUM_CLASSES, options).to(device)
     network = parallel_model(module, model, cuda_ids)
     optimizer = make_optimizer(model, settings)
+    if settings["SCHEDULER"] == "warmup_cosine":
+        make_scheduler(optimizer, settings, settings["EPOCHS"])  # 使用正式训练首轮的学习率
     auxiliary_loss = None
     if hasattr(module, "joint_loss"):
         auxiliary_loss = lambda output, targets: module.joint_loss(output, targets, options)

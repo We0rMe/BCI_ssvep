@@ -1,6 +1,6 @@
 # SSVEP 模型复现与比较
 
-本项目使用同一份 Benchmark 裁窗数据和同一套 LOSO 协议，比较 SSVEPformer、SSVEPformer eKAN、FB-SSVEPformer、SpikeTFNet、EEG-Deformer、MTSNet 和 SsvepGPT。 [SSVEPformer 与 FB-SSVEPformer](https://arxiv.org/abs/2210.04172) · [EEG-Deformer](https://github.com/yi-ding-cs/EEG-Deformer) · [MTSNet 作者实现](https://github.com/lanzhen19/MTSNet/blob/main/MTSNet.py)
+本项目使用同一份 Benchmark 裁窗数据和同一套 LOSO 协议，比较 iFuzzyTL、SSVEPformer、SSVEPformer eKAN、FB-SSVEPformer、SpikeTFNet、EEG-Deformer、MTSNet 和 SsvepGPT 等模型。 [SSVEPformer 与 FB-SSVEPformer](https://arxiv.org/abs/2210.04172) · [EEG-Deformer](https://github.com/yi-ding-cs/EEG-Deformer) · [MTSNet 作者实现](https://github.com/lanzhen19/MTSNet/blob/main/MTSNet.py)
 
 ## 准备数据与运行
 
@@ -35,6 +35,7 @@ python evaluate.py
 | `ssvepformer` | `[9, 562]`，复频谱实部与虚部沿频率轴拼接 |
 | `ssvepformer_eKAN` | `[9, 562]`，使用 eKAN 分类头 |
 | `awknet` | `[9, 125]` 或 `[9, 250]`，三级可学习时间小波、时空卷积和 KAN 分类头 |
+| `ifuzzytl` | `[9, 125]` 或 `[9, 250]`，空间与时间模糊滤波、时间平均池化和 MLP 分类头 |
 | `fb-ssvepformer` | `[3, 9, 562]`，三个子带各自做复频谱变换 |
 | `spiketfnet` | `[9, 采样点]` 和 `[9, 560]`，时域与复频谱双输入 |
 | `eeg-deformer` | `[9, 采样点]`，默认 3 个 HCT 块 |
@@ -61,7 +62,7 @@ EEG-Deformer 的输入在 `configs/eeg-deformer_config.py` 中选择。`INPUT_TY
 
 模型选择（`MODELS`）、设备、随机种子、LOSO 折数、确定性与 TF32 开关、ITR 附加时长和 GPU 预热与计时批数都在 `configs/config.py` 中设置。
 
-每个模型的结构和训练超参数在 `configs/<模型名>_config.py`。可分别调整 batch、优化器（Adam 或 SGD）、动量、权重衰减、学习率、调度器（余弦退火或固定学习率）和训练轮数。FB 复用 SSVEPformer 的子网结构参数，在自己的配置文件中设置训练参数、各子网预训练轮数和联合训练轮数。联合训练从各子网末轮权重开始。SpikeTFNet 的辅助损失权重在其自身配置文件设置。
+每个模型的结构和训练超参数在 `configs/<模型名>_config.py`。可分别调整 batch、优化器（Adam、AdamW 或 SGD）、动量、权重衰减、学习率、调度器（固定学习率、余弦退火或线性预热后余弦衰减）和训练轮数。FB 复用 SSVEPformer 的子网结构参数，在自己的配置文件中设置训练参数、各子网预训练轮数和联合训练轮数。联合训练从各子网末轮权重开始。SpikeTFNet 的辅助损失权重在其自身配置文件设置。
 
 直接运行 `python train.py` 会训练 `MODELS` 中的模型。`--models` 可以为单次运行覆盖该列表。以下命令将两个模型的结果保存在同一实验目录，每个模型按自己的配置训练。评估读取该目录中实验清单所列的模型、训练配方、输入设置和被试划分。
 
@@ -71,6 +72,27 @@ python evaluate.py --run-dir results/comparison
 ```
 
 配置 `DEVICE = "cpu"` 使用 CPU，`DEVICE = "cuda"` 时通过 `CUDA_DEVICE_IDS` 选择一张或两张显卡。例如 `CUDA_DEVICE_IDS = (0, 1)` 时，第 1、3 个模型在卡 0 上依次训练，第 2、4 个模型在卡 1 上依次训练，两张卡各用一个进程并行工作。只选一个模型时使用第一张卡。GPU 预热使用相同的模型选择与设备分配规则。
+
+### iFuzzyTL 固定前置窗实验
+
+默认实验使用预处理 1，从每个 trial 第 160 点（从零计数）起取 125 或 250 点，在窗内完成 8–64 Hz 滤波。模型直接读取 `eeg_125` 和 `eeg_250`。每折从头学习规则中心、宽度、投影和分类头，仅使用 34 名训练被试的 8,160 条固定窗。留出被试的 240 条固定窗用于末轮评估。论文在训练与测试时都随机取窗，其 Benchmark 的 62.22%（500 ms）和 85.81%（1 s）仅供跨协议参考。项目内比较使用同一预处理的逐被试 ACC 和 ITR。[IEEE 正式版](https://doi.org/10.1109/TSMC.2025.3614244) · [预印本补充材料 I-C](https://arxiv.org/pdf/2410.12267v1)
+
+模型按 IEEE 图 2 和式（10）、（13）、（15）独立实现。空间层将每个电极的整窗波形投影后，与形状为 `[规则数, 采样点]` 的中心比较。时间层接收转置后的结果，对每个时间点与 `[规则数, 电极数]` 的中心比较。每条规则都有独立的查询和值投影，负的高斯距离沿规则轴做 softmax，再加权求和。时间平均池化后使用两层 MLP，隐藏宽度为 9，ReLU、dropout 0.3，输出 40 类 logits。两层各用 10 条规则。
+
+`configs/ifuzzytl_config.py` 使用论文的 AdamW（β 为 0.9、0.95，ε 为 1e-8，权重衰减为 0.05），将论文的轮数上限 800 设为固定末轮。batch 64、峰值学习率 5e-4 和 20 轮线性预热是本实现的选择，首轮从峰值的 1/20 起步，之后按余弦衰减。每轮遍历一次训练被试的固定窗。中心以标准差为特征维数平方根倒数的正态分布初始化，宽度用对数参数保持为正。空间层与时间层的初始宽度分别取特征维数四次方根的 2 倍和 1 倍，以减轻初始高斯权重过度集中。这些初始化不依赖被试统计量。
+
+本地 CPU 冒烟使用 `python -m smoke_test.check_ifuzzytl`，报告位于 `smoke_test/output/ifuzzytl/cpu.txt`。服务器准备好共用 NPZ 后，在项目根目录运行：
+
+```text
+python -m smoke_test.check_gpu --models ifuzzytl
+```
+
+GPU 预检在首折训练被试的真实数据上，每个窗长做 3 个预热 batch、5 个计时 batch 和 1 个算子采样 batch，包含前向、反向及 AdamW 更新。正式 LOSO 前，将 `smoke_test/output/gpu_report.json` 发回核对：
+
+- 在 `models.ifuzzytl.windows` 核对输入为 `[64, 9, 125]` 和 `[64, 9, 250]`，输出在指定 GPU 上，均为 FP32 的 `[64, 40]`，`loss_and_gradients_finite` 为真。
+- 在 `runtime` 核对 4090 D 型号与编号、PyTorch/CUDA 版本、确定性开关、cuBLAS 工作区和矩阵乘法 FP32 精度（默认 `ieee`）。在各窗长记录中核对单批耗时中位数、峰值显存、`observed_operators`、`cuda_activity_enabled` 和 `cuda_kernel_examples`。模型主要使用线性投影与逐元素运算。CUDA 事件不可用时，报告只能验证算子级信息。
+
+默认模型为 `ifuzzytl`，实验目录为 `results/ifuzzytl_fixed_window/`。核对预检后，服务器用 `python train.py` 训练，再用 `python evaluate.py` 汇总。双卡对照时按计划顺序选择两个模型，设置 `CUDA_DEVICE_IDS = (0, 1)`，预检和训练使用相同的模型顺序，并使用新的实验目录。各卡独立训练各自的模型。
 
 ### AWKNet 的训练和预检
 

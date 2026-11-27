@@ -1,8 +1,8 @@
 from data_preprocess.config import NUM_SUBJECTS, OUTPUT_FILES
 
-MODELS = ("fb-ssvepformer",)
+MODELS = ("ifuzzytl",)
 PREPROCESS_IDS = (1,)  # (1,) 先截窗；(2,) 先滤波；(1, 2) 依次独立运行
-RESULT_NAME = "fb-ssvepformer"  # 训练和评估均使用 results/<RESULT_NAME>/
+RESULT_NAME = "ifuzzytl_fixed_window"  # 训练和评估均使用 results/<RESULT_NAME>/
 DEVICE = "cuda"  # "cpu" 或 "cuda"
 CUDA_DEVICE_IDS = (0,)  # 双卡示例 (0, 1)，按 MODELS 顺序轮流分配，每个模型仅用一张卡
 
