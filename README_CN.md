@@ -73,6 +73,16 @@ python evaluate.py --run-dir results/comparison
 
 配置 `DEVICE = "cpu"` 使用 CPU，`DEVICE = "cuda"` 时通过 `CUDA_DEVICE_IDS` 选择一张或两张显卡。例如 `CUDA_DEVICE_IDS = (0, 1)` 时，第 1、3 个模型在卡 0 上依次训练，第 2、4 个模型在卡 1 上依次训练，两张卡各用一个进程并行工作。只选一个模型时使用第一张卡。GPU 预热使用相同的模型选择与设备分配规则。
 
+### 固定前置窗与随机窗
+
+在 `configs/config.py` 设置 `WINDOW_MODE`。默认 `"fixed"` 从整条 trial 的 0.64 s 开始取窗；`"random"` 在完整刺激段内抽取指定长度的连续窗，训练、GPU 预检和评估共用这一选择。
+
+iFuzzyTL 预印本补充材料 I-A 写明 Benchmark 每条 trial 的有效刺激段是 0.50–5.50 s，I-C 写明训练每轮随机抽取 12,000 个窗，测试也随机取窗。作者没有给出随机起点的精确分布、是否跳过前 140 ms 或每条测试 trial 的抽窗数。项目将 `RANDOM_START_SECONDS` 默认设为 0.50，以整条 trial 为时间原点，在合法的整数采样点上均匀抽取起点。500 ms 窗的起点为第 125–1250 点，1 s 窗为第 125–1125 点，均包含两端，窗的右端最多到第 1375 点（不含）。要沿用视觉延迟假设，可把该配置改为 0.64，并换用新的实验目录。[数据段说明](https://arxiv.org/pdf/2410.12267v1#page=15) · [随机窗训练说明](https://arxiv.org/pdf/2410.12267v1#page=16)
+
+每个 LOSO 折先划分被试。每轮从训练被试和各自的 trial 中均匀、有放回地抽取 `RANDOM_WINDOWS_PER_EPOCH` 个样本，每次独立选起点。相同种子、折、窗长和轮次可重建同一批窗，断点恢复后继续按轮次抽样。评估时每名留出被试的 240 条 trial 各抽一个窗，保持原标签和区块顺序；同种子下各模型使用相同的测试窗。各窗长的起点保存在 `predictions.npz` 的 `window_start_samples_125`、`window_start_samples_250` 中，与被试、trial 和 logits 对齐。随机窗 ACC 衡量刺激段内随机位置的识别能力；报告中的 ITR 仍按窗长加 0.5 s 计算，不能解释为刺激开始后立即输出的速率。
+
+随机模式从 `data_preprocess/benchmark_full_trial.npz` 的原始整试次取数，服务器缺少该文件时运行 `python -m data_preprocess.preprocess`。预处理 1 在抽窗后滤波，预处理 2 在整试次上滤波后抽窗；FB 使用自身的子带滤波器。首次验证建议使用预处理 1，使滤波顺序与已有固定窗实验一致。随机模式的训练和评估结果位于实验目录下的 `random_windows/`，预检报告为 `smoke_test/output/random_windows/gpu_report.json`（预处理 2 再进入 `preprocess_2/`）。评估读取训练清单中的采样边界和种子。CPU 验证入口为 `python -m smoke_test.check_random_windows`。
+
 ### iFuzzyTL 固定前置窗实验
 
 默认实验使用预处理 1，从每个 trial 第 160 点（从零计数）起取 125 或 250 点，在窗内完成 8–64 Hz 滤波。模型直接读取 `eeg_125` 和 `eeg_250`。每折从头学习规则中心、宽度、投影和分类头，仅使用 34 名训练被试的 8,160 条固定窗。留出被试的 240 条固定窗用于末轮评估。论文在训练与测试时都随机取窗，其 Benchmark 的 62.22%（500 ms）和 85.81%（1 s）仅供跨协议参考。项目内比较使用同一预处理的逐被试 ACC 和 ITR。[IEEE 正式版](https://doi.org/10.1109/TSMC.2025.3614244) · [预印本补充材料 I-C](https://arxiv.org/pdf/2410.12267v1)
@@ -92,7 +102,7 @@ GPU 预检在首折训练被试的真实数据上，每个窗长做 3 个预热 
 - 在 `models.ifuzzytl.windows` 核对输入为 `[64, 9, 125]` 和 `[64, 9, 250]`，输出在指定 GPU 上，均为 FP32 的 `[64, 40]`，`loss_and_gradients_finite` 为真。
 - 在 `runtime` 核对 4090 D 型号与编号、PyTorch/CUDA 版本、确定性开关、cuBLAS 工作区和矩阵乘法 FP32 精度（默认 `ieee`）。在各窗长记录中核对单批耗时中位数、峰值显存、`observed_operators`、`cuda_activity_enabled` 和 `cuda_kernel_examples`。模型主要使用线性投影与逐元素运算。CUDA 事件不可用时，报告只能验证算子级信息。
 
-默认模型为 `ifuzzytl`，实验目录为 `results/ifuzzytl_fixed_window/`。核对预检后，服务器用 `python train.py` 训练，再用 `python evaluate.py` 汇总。双卡对照时按计划顺序选择两个模型，设置 `CUDA_DEVICE_IDS = (0, 1)`，预检和训练使用相同的模型顺序，并使用新的实验目录。各卡独立训练各自的模型。
+当前模型为 `ifuzzytl`，固定窗实验目录为 `results/ifuzzytl/`。核对预检后，服务器用 `python train.py` 训练，再用 `python evaluate.py` 汇总。双卡对照时按计划顺序选择两个模型，设置 `CUDA_DEVICE_IDS = (0, 1)`，预检和训练使用相同的模型顺序，并使用新的实验目录。各卡独立训练各自的模型。
 
 ### AWKNet 的训练和预检
 

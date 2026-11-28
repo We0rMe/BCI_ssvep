@@ -11,9 +11,10 @@ from filelock import FileLock
 from configs import config
 from data_preprocess import config as data_config
 from data_preprocess.preprocess import window_samples
+from data_preprocess.random_windows import RandomWindows
 from train import (
     archive_method, atomic_write, check_archive, configure_runtime, fold_directory, input_shapes, loso_splits, model_module,
-    experiment_args, model_config, model_devices, parallel_model, prediction_logits, prepare_inputs, read_archive, runtime_details, save_text,
+    experiment_args, experiment_inputs, model_config, model_devices, parallel_model, prediction_logits, read_archive, runtime_details, save_text,
     subject_loader, training_settings,
 )
 
@@ -78,7 +79,7 @@ def evaluate_model(name, archive, plan, checkpoint_dir, output_dir, device, cuda
     predictions = {"labels": labels, "block_ids": archive["block_ids"]}
     for count in plan["window_samples"]:
         network, inputs = None, None
-        all_logits, tested = [], []
+        all_logits, tested, window_starts = [], [], []
         for split in plan["splits"]:
             subject = split["test"]
             checkpoint = fold_directory(checkpoint_dir, count, subject) / "artifacts" / "checkpoint.pt"
@@ -89,12 +90,18 @@ def evaluate_model(name, archive, plan, checkpoint_dir, output_dir, device, cuda
             if not complete:
                 continue
             if network is None:
-                inputs = prepare_inputs(module, archive, count, options)
+                inputs = experiment_inputs(module, archive, count, options, plan.get("window_sampling"),
+                                           plan.get("preprocess_id", 1))
                 model = module.build_model(input_shapes(inputs), num_classes, options).to(device)
                 network = parallel_model(module, model, cuda_ids)
             weight_key = "model" if plan.get("protocol") == "loso_final_epoch" else "best_model"
             model.load_state_dict(state[weight_key])
-            loader = subject_loader(inputs, labels, subject_ids, [subject], settings["BATCH_SIZE"], device)
+            if isinstance(inputs, RandomWindows):
+                selection = inputs.draw(split, settings["SEED"])
+                loader = inputs.batches(selection, settings["BATCH_SIZE"])
+                window_starts.append(selection[2])
+            else:
+                loader = subject_loader(inputs, labels, subject_ids, [subject], settings["BATCH_SIZE"], device)
             logits = predict(network, loader, device)
             correct = int((logits.argmax(axis=1) == labels).sum())
             accuracy = correct / len(labels)
@@ -107,6 +114,8 @@ def evaluate_model(name, archive, plan, checkpoint_dir, output_dir, device, cuda
         if tested:
             predictions[f"subject_ids_{count}"] = np.asarray(tested)
             predictions[f"logits_{count}"] = np.stack(all_logits)
+            if window_starts:
+                predictions[f"window_start_samples_{count}"] = np.stack(window_starts)
 
     write_test_details(output_dir, output_dir.name, rows, predictions)
     return rows
@@ -129,6 +138,8 @@ def load_legacy_plan(run_dir, settings):
 
 def legacy_differences(old, new, old_data, shared_data):
     differences = []
+    if new.get("window_sampling"):
+        differences.append("旧实验使用固定前置窗，本次实验使用随机窗")
     recipe_keys = ("SEED", "BATCH_SIZE", "LEARNING_RATE", "WEIGHT_DECAY", "EPOCHS", "OPTIMIZER")
     if any(old["settings"][key] != new["settings"][key] for key in recipe_keys):
         differences.append("训练配方")
@@ -194,6 +205,11 @@ def write_comparison(run_dir, all_results):
     header = ["| 模型 | 窗长 | 已评估折数 | ACC（%） | ITR（bits/min） |", "| --- | ---: | ---: | ---: | ---: |"]
     lines = ["# 留出被试测试汇总", "",
              "每个模型、窗长按被试汇总均值 ± 总体标准差。计划折数全部评估后显示汇总值。", "", *header]
+    if all_results and all_results[0][1].get("window_sampling"):
+        sampling = all_results[0][1]["window_sampling"]
+        lines[2:2] = [f"随机窗实验。整条 trial 的可用采样区间为 "
+                      f"[{sampling['first_sample']}, {sampling['stop_sample']})，"
+                      f"每轮训练抽取 {sampling['train_windows']} 个窗，测试每条 trial 抽一个窗。", ""]
     different = []
     for name, plan, rows, differences in all_results:
         if differences:
@@ -222,11 +238,13 @@ def evaluate_experiment(data_file, run_dir, legacy_run=None, legacy_data_file=No
     with FileLock(artifacts / "run.lock", timeout=0), data_file.open("rb") as source:
         archive, digest = read_archive(source)
         with archive:
-            method = archive_method(archive, preprocess_id)
+            source_method = archive_method(archive)
             results = []
             if path.exists():
                 plan = json.loads(path.read_text(encoding="utf-8"))
-                if digest != plan["data_sha256"] or plan.get("preprocess_id", 1) != method:
+                method = plan.get("preprocess_id", 1)
+                expected_source = 2 if plan.get("window_sampling") else method
+                if digest != plan["data_sha256"] or source_method != expected_source or preprocess_id not in (None, method):
                     raise ValueError("预处理数据的指纹与训练记录不符，请使用训练时的文件")
                 assignments = model_devices(plan["model_order"], available_ids)
                 for name in plan["model_order"]:
@@ -251,6 +269,8 @@ def evaluate_experiment(data_file, run_dir, legacy_run=None, legacy_data_file=No
                         "runtime": runtime_details(device, cuda_ids), "models": {"eeg-deformer": eeg_config.SETTINGS},
                         "splits": loso_splits(archive["subject_ids"], config.LOSO_FOLDS),
                     }
+                    if path.exists() and plan.get("window_sampling"):
+                        reference["window_sampling"] = plan["window_sampling"]
                 results.append(evaluate_legacy(run_dir, Path(legacy_run), legacy_data_file,
                                                archive, reference, device, cuda_ids))
             write_comparison(run_dir, results)

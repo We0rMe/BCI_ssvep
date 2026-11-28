@@ -23,6 +23,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from configs import config
 from data_preprocess import config as data_config
 from data_preprocess.preprocess import start_sample, window_samples
+from data_preprocess.random_windows import RandomWindows, sampling_config
 
 
 EPOCH_COLUMNS = (
@@ -121,6 +122,8 @@ def subject_loader(inputs, labels, subject_ids, selected_ids, batch_size, device
 
 
 def input_shapes(inputs):
+    if isinstance(inputs, RandomWindows):
+        return inputs.shapes()
     return tuple(array.shape[2:] for array in inputs)
 
 
@@ -130,6 +133,12 @@ def prepare_inputs(module, archive, count, options):
     if any(array.shape[:2] != expected for array in inputs):
         raise ValueError(f"{module.__name__} 的输入须与共用数据中的被试和试次对应")
     return inputs
+
+
+def experiment_inputs(module, archive, count, options, sampling, method):
+    if sampling:
+        return RandomWindows(module, archive, count, options, sampling, method)
+    return prepare_inputs(module, archive, count, options)
 
 
 def set_seed(seed, cuda_ids):
@@ -251,7 +260,9 @@ def train_fold(module, options, plan, settings, inputs, labels, subject_ids, spl
     set_seed(settings["SEED"], cuda_ids)
     shuffle = torch.Generator().manual_seed(settings["SEED"])
     model = module.build_model(input_shapes(inputs), data_config.NUM_CLASSES, options).to(device)
-    train_loader = subject_loader(inputs, labels, subject_ids, split["train"], settings["BATCH_SIZE"], device, shuffle)
+    random_windows = isinstance(inputs, RandomWindows)
+    if not random_windows:
+        train_loader = subject_loader(inputs, labels, subject_ids, split["train"], settings["BATCH_SIZE"], device, shuffle)
     auxiliary_loss = None
     if hasattr(module, "joint_loss"):
         auxiliary_loss = lambda output, targets: module.joint_loss(output, targets, options)
@@ -284,6 +295,9 @@ def train_fold(module, options, plan, settings, inputs, labels, subject_ids, spl
         for stage_epoch in range(done + 1, epochs + 1):
             lr = optimizer.param_groups[0]["lr"]
             started = perf_counter()
+            if random_windows:
+                selection = inputs.draw(split, settings["SEED"], epoch=len(history))
+                train_loader = inputs.batches(selection, settings["BATCH_SIZE"])
             train_loss, train_acc = run_epoch(network, train_loader, device, optimizer, auxiliary_loss, band)
             train_seconds = perf_counter() - started
             if not math.isfinite(train_loss):
@@ -339,7 +353,8 @@ def train_model(name, manifest, archive, run_dir, device):
     results = []
     print(f"{name} 使用 {device}", flush=True)
     for count in manifest["window_samples"]:
-        inputs = prepare_inputs(module, archive, count, options)
+        inputs = experiment_inputs(module, archive, count, options, manifest.get("window_sampling"),
+                                   manifest.get("preprocess_id", 1))
         scores, seconds = [], 0.0
         for split in manifest["model_runs"][name]["splits"]:
             folder = fold_directory(model_dir, count, split["test"])
@@ -402,13 +417,15 @@ def train_experiment(data_file, run_dir, names=None, preprocess_id=None):
     _, cuda_ids = configure_runtime()
     devices = model_devices(names, cuda_ids)
     counts = window_samples(data_config.WINDOW_SECONDS)
+    sampling = sampling_config(config, counts)
     artifacts = run_dir / "artifacts"
     artifacts.mkdir(parents=True, exist_ok=True)
     with FileLock(artifacts / "run.lock", timeout=0), data_file.open("rb") as source:
         archive, digest = read_archive(source)
         with archive:
-            method = archive_method(archive, preprocess_id)
-            check_archive(archive, counts)
+            source_method = archive_method(archive, 2 if sampling else preprocess_id)
+            method = (preprocess_id or 1) if sampling else source_method
+            check_archive(archive, () if sampling else counts)
             subject_ids = archive["subject_ids"]
             fs = archive["sampling_rate_hz"].item()
             model_runs = {}
@@ -428,6 +445,8 @@ def train_experiment(data_file, run_dir, names=None, preprocess_id=None):
             }
             if method == 2:
                 manifest["preprocess_id"] = method
+            if sampling:
+                manifest["window_sampling"] = sampling
             save_manifest(artifacts / "run.json", manifest)
             report = run_dir / "report.md"
             if not report.exists():

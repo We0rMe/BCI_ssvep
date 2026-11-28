@@ -9,9 +9,10 @@ from torch.profiler import ProfilerActivity, profile, supported_activities
 from configs import config
 from data_preprocess import config as data_config
 from data_preprocess.preprocess import window_samples
+from data_preprocess.random_windows import RandomWindows, sampling_config
 from train import (
     archive_method, batch_step, check_archive, configure_runtime, input_shapes, loso_splits, make_optimizer, experiment_args, model_devices,
-    make_scheduler, model_module, parallel_model, prepare_inputs, runtime_details, model_config, set_seed, subject_loader, training_settings,
+    experiment_inputs, make_scheduler, model_module, parallel_model, runtime_details, model_config, set_seed, subject_loader, training_settings,
 )
 
 
@@ -19,8 +20,14 @@ def probe(module, options, inputs, labels, subject_ids, split, device, cuda_ids,
     set_seed(settings["SEED"], cuda_ids)
     shuffle = torch.Generator().manual_seed(settings["SEED"])
     batch_size = settings["BATCH_SIZE"]
-    loader = subject_loader(inputs, labels, subject_ids, split["train"], batch_size, device, shuffle)
-    if len(loader.dataset) // batch_size < config.GPU_WARMUP_BATCHES + config.GPU_PROBE_BATCHES + 1:
+    if isinstance(inputs, RandomWindows):
+        selection = inputs.draw(split, settings["SEED"], epoch=0)
+        loader = inputs.batches(selection, batch_size)
+        size = len(selection[1])
+    else:
+        loader = subject_loader(inputs, labels, subject_ids, split["train"], batch_size, device, shuffle)
+        size = len(loader.dataset)
+    if size // batch_size < config.GPU_WARMUP_BATCHES + config.GPU_PROBE_BATCHES + 1:
         raise ValueError("训练样本不足以提供完整的预热和计时 batch")
     batches = iter(loader)
     shapes = input_shapes(inputs)
@@ -43,10 +50,12 @@ def probe(module, options, inputs, labels, subject_ids, split, device, cuda_ids,
     for index in cuda_ids:
         torch.cuda.reset_peak_memory_stats(index)
 
-    durations = []
+    durations, prepare_times = [], []
     for _ in range(config.GPU_PROBE_BATCHES):
+        before_batch = perf_counter()
         batch = next(batches)
         started = perf_counter()
+        prepare_times.append(1000 * (started - before_batch))
         loss, _, _ = batch_step(network, batch, device, optimizer, auxiliary_loss)
         synchronize()
         durations.append(1000 * (perf_counter() - started))
@@ -83,6 +92,7 @@ def probe(module, options, inputs, labels, subject_ids, split, device, cuda_ids,
     return {
         "input_shapes": [[batch_size, *shape] for shape in shapes], "logits_per_device": observed,
         "loss_and_gradients_finite": True, "median_train_batch_ms": round(statistics.median(durations), 2),
+        "median_batch_prepare_ms": round(statistics.median(prepare_times), 2),
         "peak_allocated_memory_mib": memory, "observed_operators": operators,
         "cuda_activity_enabled": ProfilerActivity.CUDA in activities,
         "cuda_kernel_examples": list(dict.fromkeys(event.name[:180] for event in events))[:5],
@@ -96,9 +106,12 @@ def probe_dataset(names, method, data_file, directory):
     assignments = model_devices(names, cuda_ids)
     counts = window_samples(data_config.WINDOW_SECONDS)
     report = {"preprocess_id": method, "models": {}}
+    sampling = sampling_config(config, counts)
+    if sampling:
+        report["window_sampling"] = sampling
     with np.load(data_file, allow_pickle=False) as archive:
-        archive_method(archive, method)
-        check_archive(archive, counts)
+        archive_method(archive, 2 if sampling else method)
+        check_archive(archive, () if sampling else counts)
         subject_ids, labels = archive["subject_ids"], archive["labels"]
         split = loso_splits(subject_ids, 1)[0]
         for name in names:
@@ -111,7 +124,7 @@ def probe_dataset(names, method, data_file, directory):
                        "runtime": runtime_details(device, assigned), "windows": {}}
             for count in counts:
                 print(f"正在检查 {name} / {count}pt / {assigned}", flush=True)
-                inputs = prepare_inputs(module, archive, count, options)
+                inputs = experiment_inputs(module, archive, count, options, sampling, method)
                 results["windows"][str(count)] = probe(module, options, inputs, labels, subject_ids,
                                                        split, device, assigned, settings)
                 del inputs

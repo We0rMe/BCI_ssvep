@@ -21,12 +21,16 @@ class FBSSVEPformer(nn.Module):
         return self.fusion(scores).squeeze(1)
 
 
-def prepare_inputs(archive, count, settings):
-    fs = archive["sampling_rate_hz"].item()
-    filters = make_filter_bank(
+def full_trial_bands(fs, settings):
+    return make_filter_bank(
         fs, settings["subbands_hz"], settings["lower_transition_hz"], settings["upper_stop_hz"],
         settings["passband_ripple_db"], settings["stopband_attenuation_db"],
     )
+
+
+def prepare_inputs(archive, count, settings):
+    fs = archive["sampling_rate_hz"].item()
+    filters = full_trial_bands(fs, settings)
 
     def make_features(trials, start=0):
         features = [window_features(band[..., start : start + count], fs, settings)

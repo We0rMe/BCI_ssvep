@@ -105,7 +105,8 @@ def main():
         directory = Path(tmp)
         data_file = directory / "benchmark.npz"
         make_small_data(data_file)
-        check_resume(data_file, directory)
+        with patch.object(config, "WINDOW_MODE", "fixed"):
+            check_resume(data_file, directory)
     summary += ["CPU 冒烟通过。两个窗长的规则输出、梯度和逐试次推理通过核对。",
                 "微型 LOSO 每人 4 个真实试次，S2、S3 训练，S1 评估。预热、衰减、训练耗时和断点恢复已验证。"]
     report = "\n".join(summary) + "\n"
